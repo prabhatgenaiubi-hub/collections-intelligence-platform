@@ -214,30 +214,26 @@ export default function GraceManagement() {
 }
 
 function LoanDetailModal({ loanId, onClose }) {
-  const [loan,     setLoan]     = useState(null);
-  const [payments, setPayments] = useState([]);
-  const [loading,  setLoading]  = useState(true);
+  const [data,    setData]    = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState('');
 
   useEffect(() => {
-    Promise.all([
-      api.get(`/officer/loan-intelligence/${loanId}`),
-    ])
-      .then(([r]) => {
-        setLoan(r.data);
+    api.get(`/officer/loan-intelligence/${loanId}`)
+      .then(r => setData(r.data))
+      .catch(err => {
+        console.error(err);
+        setError(err.response?.data?.detail || 'Failed to load loan details.');
       })
-      .catch(console.error)
       .finally(() => setLoading(false));
   }, [loanId]);
 
-  if (loading) return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="bg-white rounded-2xl p-8"><div className="animate-spin rounded-full h-10 w-10 border-4 border-blue-500 border-t-transparent mx-auto"></div></div>
-    </div>
-  );
-
-  const info = loan?.loan_info || {};
-  const risk = info.risk_segment;
   const riskMap = { High: 'bg-red-100 text-red-700', Medium: 'bg-yellow-100 text-yellow-700', Low: 'bg-green-100 text-green-700' };
+
+  const loan      = data?.loan || {};
+  const customer  = data?.customer || {};
+  const analytics = data?.analytics || {};
+  const risk      = analytics.risk_segment;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
@@ -251,29 +247,44 @@ function LoanDetailModal({ loanId, onClose }) {
           <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-2xl leading-none">✕</button>
         </div>
         <div className="overflow-y-auto p-6 space-y-4">
-          {!loan ? (
+          {loading ? (
+            <div className="flex justify-center py-8">
+              <div className="animate-spin rounded-full h-10 w-10 border-4 border-blue-500 border-t-transparent"></div>
+            </div>
+          ) : error ? (
+            <p className="text-red-500 text-center py-4">⚠️ {error}</p>
+          ) : !data ? (
             <p className="text-gray-400 text-center">No data available.</p>
           ) : (
             <>
               <div className="bg-gray-50 rounded-xl p-4 grid grid-cols-2 md:grid-cols-3 gap-4">
-                <MiniDetail label="Customer"      value={info.customer_name} />
-                <MiniDetail label="Loan Type"     value={info.loan_type} />
-                <MiniDetail label="Loan Amount"   value={`₹${info.loan_amount?.toLocaleString('en-IN')}`} />
-                <MiniDetail label="Outstanding"   value={`₹${info.outstanding_balance?.toLocaleString('en-IN')}`} />
-                <MiniDetail label="EMI Amount"    value={`₹${info.emi_amount?.toLocaleString('en-IN')}`} />
-                <MiniDetail label="Days Past Due" value={info.days_past_due} highlight={info.days_past_due > 0} />
-                <MiniDetail label="Interest Rate" value={`${info.interest_rate}%`} />
-                <MiniDetail label="EMI Due Date"  value={info.emi_due_date} />
-                <MiniDetail label="Loan Status"   value={info.loan_status} />
+                <MiniDetail label="Customer"      value={customer.customer_name} />
+                <MiniDetail label="Loan Type"     value={loan.loan_type} />
+                <MiniDetail label="Loan Amount"   value={loan.loan_amount != null ? `₹${loan.loan_amount.toLocaleString('en-IN')}` : '—'} />
+                <MiniDetail label="Outstanding"   value={loan.outstanding_balance != null ? `₹${loan.outstanding_balance.toLocaleString('en-IN')}` : '—'} />
+                <MiniDetail label="EMI Amount"    value={loan.emi_amount != null ? `₹${loan.emi_amount.toLocaleString('en-IN')}` : '—'} />
+                <MiniDetail label="Days Past Due" value={loan.days_past_due} highlight={(loan.days_past_due ?? 0) > 0} />
+                <MiniDetail label="Interest Rate" value={loan.interest_rate != null ? `${loan.interest_rate}%` : '—'} />
+                <MiniDetail label="EMI Due Date"  value={loan.emi_due_date} />
+                <MiniDetail label="Credit Score"  value={customer.credit_score} />
               </div>
-              {loan.analytics && (
+              {data.analytics && (
                 <div className="bg-blue-50 rounded-xl p-4">
                   <p className="text-xs font-semibold text-blue-700 mb-2 uppercase tracking-wide">Analytics</p>
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                    <MiniDetail label="Self-Cure Prob."  value={`${(loan.analytics.self_cure_probability * 100).toFixed(0)}%`} />
-                    <MiniDetail label="Recovery Strategy" value={loan.analytics.recovery_strategy} />
-                    <MiniDetail label="Recommended Channel" value={loan.analytics.recommended_channel} />
+                    <MiniDetail
+                      label="Self-Cure Prob."
+                      value={analytics.self_cure_probability != null ? `${(analytics.self_cure_probability * 100).toFixed(0)}%` : '—'}
+                    />
+                    <MiniDetail label="Recovery Strategy" value={analytics.recovery_strategy?.strategy ?? analytics.recovery_strategy ?? '—'} />
+                    <MiniDetail label="Recommended Channel" value={analytics.recommended_channel} />
                   </div>
+                </div>
+              )}
+              {data.llm_recommendation && (
+                <div className="bg-green-50 rounded-xl p-4">
+                  <p className="text-xs font-semibold text-green-700 mb-1 uppercase tracking-wide">AI Recommendation</p>
+                  <p className="text-sm text-gray-700 whitespace-pre-line">{data.llm_recommendation}</p>
                 </div>
               )}
             </>
