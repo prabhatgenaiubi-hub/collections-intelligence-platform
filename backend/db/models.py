@@ -177,6 +177,36 @@ class ChatMessage(Base):
 
 
 # ─────────────────────────────────────────────
+# Officer Chat Sessions Table
+# ─────────────────────────────────────────────
+class OfficerChatSession(Base):
+    __tablename__ = "officer_chat_sessions"
+
+    session_id    = Column(String, primary_key=True, default=gen_uuid)
+    officer_id    = Column(String, nullable=False)
+    session_title = Column(String, default="New Chat")
+    created_at    = Column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    last_updated  = Column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+    messages      = relationship("OfficerChatMessage", back_populates="session")
+
+
+# ─────────────────────────────────────────────
+# Officer Chat Messages Table
+# ─────────────────────────────────────────────
+class OfficerChatMessage(Base):
+    __tablename__ = "officer_chat_messages"
+
+    message_id   = Column(String, primary_key=True, default=gen_uuid)
+    session_id   = Column(String, ForeignKey("officer_chat_sessions.session_id"), nullable=False)
+    role         = Column(String, nullable=False)   # user / assistant
+    message_text = Column(Text, nullable=False)
+    timestamp    = Column(String, default=lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+    session      = relationship("OfficerChatSession", back_populates="messages")
+
+
+# ─────────────────────────────────────────────
 # Bank Officer Table
 # ─────────────────────────────────────────────
 class BankOfficer(Base):

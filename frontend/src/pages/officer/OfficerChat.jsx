@@ -32,7 +32,7 @@ export default function OfficerChat() {
   ];
 
   useEffect(() => {
-    api.get('/chat/sessions')
+    api.get('/officer/chat/sessions')
       .then(r => setSessions(r.data.sessions || []))
       .catch(console.error);
   }, []);
@@ -40,7 +40,7 @@ export default function OfficerChat() {
   const loadSession = async (sid) => {
     setLoadingMsg(true);
     try {
-      const r = await api.get(`/chat/sessions/${sid}`);
+      const r = await api.get(`/officer/chat/sessions/${sid}`);
       setActiveSession(r.data);
       setMessages(r.data.messages || []);
     } catch (err) {
@@ -60,10 +60,10 @@ export default function OfficerChat() {
       ? `Loan Analysis: ${loanId.trim().toUpperCase()}`
       : 'General Collections Chat';
     try {
-      const r = await api.post('/chat/sessions', { session_title: title });
-      const sessR = await api.get('/chat/sessions');
+      const r = await api.post('/officer/chat/sessions', { session_title: title });
+      const sessR = await api.get('/officer/chat/sessions');
       setSessions(sessR.data.sessions || []);
-      setActiveSession(r.data);
+      setActiveSession(r.data.session);
       setMessages([]);
     } catch (err) {
       console.error(err);
@@ -84,11 +84,12 @@ export default function OfficerChat() {
     setMessages(m => [...m, { role: 'user', message_text: fullMsg, timestamp: new Date().toISOString() }]);
 
     try {
-      const r = await api.post(`/chat/sessions/${activeSession.session_id}/message`, {
+      const r = await api.post(`/officer/chat/sessions/${activeSession.session_id}/message`, {
         message: fullMsg,
+        loan_id: mode === 'loan' && loanId.trim() ? loanId.trim().toUpperCase() : undefined,
       });
       setMessages(m => [...m, r.data.ai_response]);
-      const sessR = await api.get('/chat/sessions');
+      const sessR = await api.get('/officer/chat/sessions');
       setSessions(sessR.data.sessions || []);
     } catch (err) {
       console.error(err);
@@ -104,8 +105,8 @@ export default function OfficerChat() {
 
   const deleteSession = async (sid) => {
     try {
-      await api.delete(`/chat/sessions/${sid}`);
-      const sessR = await api.get('/chat/sessions');
+      await api.delete(`/officer/chat/sessions/${sid}`);
+      const sessR = await api.get('/officer/chat/sessions');
       setSessions(sessR.data.sessions || []);
       if (activeSession?.session_id === sid) {
         setActiveSession(null);
@@ -234,7 +235,7 @@ export default function OfficerChat() {
               {currentPrompts.map((q, i) => (
                 <button
                   key={i}
-                  onClick={() => { createSession().then(() => {}); }}
+                  onClick={() => { createSession(); }}
                   className="w-full text-left text-sm px-4 py-2.5 bg-gray-50 hover:bg-blue-50 border border-gray-200 hover:border-blue-200 rounded-xl text-gray-700 transition-colors"
                 >
                   {q}

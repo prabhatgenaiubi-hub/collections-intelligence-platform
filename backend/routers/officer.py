@@ -12,11 +12,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from typing import Optional
+from pydantic import BaseModel
 
 from backend.db.database import get_db
 from backend.db.models import (
     Customer, Loan, PaymentHistory,
-    InteractionHistory, GraceRequest, RestructureRequest
+    InteractionHistory, GraceRequest, RestructureRequest,
+    OfficerChatSession, OfficerChatMessage,
 )
 from backend.routers.auth import get_current_officer
 from backend.agents.collections_intelligence_agent import analyze_loan
@@ -524,3 +526,450 @@ def get_customer_for_officer(
             for i in interactions
         ],
     }
+
+
+# ═════════════════════════════════════════════
+# OFFICER CHAT ENDPOINTS
+# ═════════════════════════════════════════════
+
+class OfficerChatRequest(BaseModel):
+    session_title: Optional[str] = "General Collections Chat"
+
+
+class OfficerMessageRequest(BaseModel):
+    message: str
+    loan_id: Optional[str] = None
+
+
+def _format_officer_session(session: OfficerChatSession, db: Session) -> dict:
+    last_msg = (
+        db.query(OfficerChatMessage)
+        .filter(OfficerChatMessage.session_id == session.session_id,
+                OfficerChatMessage.role == "user")
+        .order_by(OfficerChatMessage.timestamp.desc())
+        .first()
+    )
+    return {
+        "session_id":    session.session_id,
+        "session_title": session.session_title,
+        "created_at":    session.created_at,
+        "last_updated":  session.last_updated,
+        "last_message":  last_msg.message_text[:60] if last_msg else None,
+    }
+
+
+# ─────────────────────────────────────────────
+# GET /officer/chat/sessions
+# ─────────────────────────────────────────────
+
+@router.get("/chat/sessions")
+def officer_list_sessions(
+    current_user: dict = Depends(get_current_officer),
+    db: Session        = Depends(get_db),
+):
+    """List all chat sessions for the current officer."""
+    officer_id = current_user["user_id"]
+    sessions = (
+        db.query(OfficerChatSession)
+        .filter(OfficerChatSession.officer_id == officer_id)
+        .order_by(OfficerChatSession.last_updated.desc())
+        .all()
+    )
+    return {
+        "success":  True,
+        "sessions": [_format_officer_session(s, db) for s in sessions],
+    }
+
+
+# ─────────────────────────────────────────────
+# POST /officer/chat/sessions
+# ─────────────────────────────────────────────
+
+@router.post("/chat/sessions")
+def officer_create_session(
+    body:         OfficerChatRequest,
+    current_user: dict = Depends(get_current_officer),
+    db: Session        = Depends(get_db),
+):
+    """Create a new officer chat session."""
+    from datetime import datetime
+    officer_id = current_user["user_id"]
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    session = OfficerChatSession(
+        officer_id    = officer_id,
+        session_title = body.session_title or "General Collections Chat",
+        created_at    = now,
+        last_updated  = now,
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+
+    # Welcome message
+    welcome = OfficerChatMessage(
+        session_id   = session.session_id,
+        role         = "assistant",
+        message_text = (
+            "Hello! I'm your Collections Intelligence AI Assistant.\n"
+            "I can help you with:\n"
+            "• Portfolio analysis and risk insights\n"
+            "• Recovery strategy recommendations\n"
+            "• Loan-specific intelligence\n"
+            "• Customer sentiment and behaviour trends\n\n"
+            "How can I assist you today?"
+        ),
+        timestamp    = now,
+    )
+    db.add(welcome)
+    db.commit()
+
+    return {
+        "success":    True,
+        "session_id": session.session_id,
+        "session":    _format_officer_session(session, db),
+        "message":    "Officer chat session created successfully.",
+    }
+
+
+# ─────────────────────────────────────────────
+# GET /officer/chat/sessions/{session_id}
+# ─────────────────────────────────────────────
+
+@router.get("/chat/sessions/{session_id}")
+def officer_get_session(
+    session_id:   str,
+    current_user: dict = Depends(get_current_officer),
+    db: Session        = Depends(get_db),
+):
+    """Return a session with all its messages."""
+    officer_id = current_user["user_id"]
+    session = db.query(OfficerChatSession).filter(
+        OfficerChatSession.session_id == session_id,
+        OfficerChatSession.officer_id == officer_id,
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    messages = (
+        db.query(OfficerChatMessage)
+        .filter(OfficerChatMessage.session_id == session_id)
+        .order_by(OfficerChatMessage.timestamp.asc())
+        .all()
+    )
+    return {
+        "session_id":    session.session_id,
+        "session_title": session.session_title,
+        "created_at":    session.created_at,
+        "last_updated":  session.last_updated,
+        "messages": [
+            {
+                "message_id":   m.message_id,
+                "role":         m.role,
+                "message_text": m.message_text,
+                "timestamp":    m.timestamp,
+            }
+            for m in messages
+        ],
+        "total_messages": len(messages),
+    }
+
+
+# ─────────────────────────────────────────────
+# POST /officer/chat/sessions/{session_id}/message
+# ─────────────────────────────────────────────
+
+@router.post("/chat/sessions/{session_id}/message")
+def officer_send_message(
+    session_id:   str,
+    body:         OfficerMessageRequest,
+    current_user: dict = Depends(get_current_officer),
+    db: Session        = Depends(get_db),
+):
+    """Send a message in an officer chat session and get AI response."""
+    from datetime import datetime
+    officer_id = current_user["user_id"]
+
+    session = db.query(OfficerChatSession).filter(
+        OfficerChatSession.session_id == session_id,
+        OfficerChatSession.officer_id == officer_id,
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    if not body.message or not body.message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty.")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # ── Fetch conversation history BEFORE saving current message ──
+    # Order by message_id (autoincrement) — never by timestamp which can collide
+    prior_msgs = (
+        db.query(OfficerChatMessage)
+        .filter(OfficerChatMessage.session_id == session_id)
+        .order_by(OfficerChatMessage.message_id.asc())
+        .limit(12)
+        .all()
+    )
+    history_str = ""
+    for m in prior_msgs:
+        role_label = "Officer" if m.role == "user" else "AI"
+        history_str += f"[{role_label}]: {m.message_text}\n"
+
+    # Save user message
+    user_msg = OfficerChatMessage(
+        session_id   = session_id,
+        role         = "user",
+        message_text = body.message.strip(),
+        timestamp    = now,
+    )
+    db.add(user_msg)
+    db.commit()
+
+    # ── Build rich context for the AI ────────────────────────────
+    all_loans   = db.query(Loan).all()
+    high_risk   = [l for l in all_loans if l.risk_segment == "High"]
+    medium_risk = [l for l in all_loans if l.risk_segment == "Medium"]
+    low_risk    = [l for l in all_loans if l.risk_segment == "Low"]
+    total_outstanding = sum(l.outstanding_balance for l in all_loans)
+    overdue_loans = [l for l in all_loans if l.days_past_due > 0]
+
+    portfolio_summary = (
+        f"Portfolio: {len(all_loans)} total loans | "
+        f"Outstanding: ₹{total_outstanding:,.0f} | "
+        f"High Risk: {len(high_risk)} | Medium Risk: {len(medium_risk)} | Low Risk: {len(low_risk)} | "
+        f"Overdue: {len(overdue_loans)}"
+    )
+
+    # If loan_id provided, fetch specific loan data
+    loan_context = ""
+    if body.loan_id:
+        specific_loan = db.query(Loan).filter(Loan.loan_id == body.loan_id).first()
+        if specific_loan:
+            cust = db.query(Customer).filter(Customer.customer_id == specific_loan.customer_id).first()
+
+            # Payment history
+            payments = (
+                db.query(PaymentHistory)
+                .filter(PaymentHistory.loan_id == body.loan_id)
+                .order_by(PaymentHistory.payment_date.desc())
+                .limit(6)
+                .all()
+            )
+            payment_str = ", ".join(
+                [f"₹{p.payment_amount:,.0f} on {p.payment_date}" for p in payments]
+            ) or "No payment history"
+
+            # Grace / restructure history
+            grace_count = db.query(GraceRequest).filter(GraceRequest.loan_id == body.loan_id).count()
+            rest_count  = db.query(RestructureRequest).filter(RestructureRequest.loan_id == body.loan_id).count()
+
+            loan_context = (
+                f"\nLoan Details for {body.loan_id}:\n"
+                f"  Type: {specific_loan.loan_type}\n"
+                f"  Amount: ₹{specific_loan.loan_amount:,.0f} | Outstanding: ₹{specific_loan.outstanding_balance:,.0f}\n"
+                f"  EMI: ₹{specific_loan.emi_amount:,.0f} | Due Date: {specific_loan.emi_due_date}\n"
+                f"  Days Past Due (DPD): {specific_loan.days_past_due}\n"
+                f"  Risk Segment: {specific_loan.risk_segment}\n"
+                f"  Self-Cure Probability: {(specific_loan.self_cure_probability or 0)*100:.0f}%\n"
+                f"  Recommended Channel: {specific_loan.recommended_channel}\n"
+            )
+            if cust:
+                loan_context += (
+                    f"Customer: {cust.customer_name} | Credit Score: {cust.credit_score} | "
+                    f"Income: ₹{cust.monthly_income:,.0f}/mo | Channel: {cust.preferred_channel}\n"
+                )
+            loan_context += (
+                f"  Recent Payments: {payment_str}\n"
+                f"  Grace Requests: {grace_count} | Restructure Requests: {rest_count}\n"
+            )
+
+    # ── Generate AI response ──────────────────────────────────────
+    ai_text = _generate_officer_chat_response(
+        question         = body.message.strip(),
+        portfolio_summary= portfolio_summary,
+        loan_context     = loan_context,
+        history          = history_str,
+        db               = db,
+        loan_id          = body.loan_id,
+    )
+
+    # Save assistant response
+    now2 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    assistant_msg = OfficerChatMessage(
+        session_id   = session_id,
+        role         = "assistant",
+        message_text = ai_text,
+        timestamp    = now2,
+    )
+    db.add(assistant_msg)
+
+    # Update session title from first user question
+    session.last_updated = now2
+    user_msgs_count = db.query(OfficerChatMessage).filter(
+        OfficerChatMessage.session_id == session_id,
+        OfficerChatMessage.role == "user"
+    ).count()
+    if user_msgs_count == 1:  # first user message — set as title
+        session.session_title = body.message.strip()[:60]
+
+    db.commit()
+    db.refresh(assistant_msg)
+
+    return {
+        "success":    True,
+        "session_id": session_id,
+        "user_message": {
+            "role":         "user",
+            "message_text": body.message.strip(),
+            "timestamp":    now,
+        },
+        "ai_response": {
+            "message_id":   assistant_msg.message_id,
+            "role":         "assistant",
+            "message_text": ai_text,
+            "timestamp":    assistant_msg.timestamp,
+        },
+    }
+
+
+# ─────────────────────────────────────────────
+# DELETE /officer/chat/sessions/{session_id}
+# ─────────────────────────────────────────────
+
+@router.delete("/chat/sessions/{session_id}")
+def officer_delete_session(
+    session_id:   str,
+    current_user: dict = Depends(get_current_officer),
+    db: Session        = Depends(get_db),
+):
+    """Delete an officer chat session and all its messages."""
+    officer_id = current_user["user_id"]
+    session = db.query(OfficerChatSession).filter(
+        OfficerChatSession.session_id == session_id,
+        OfficerChatSession.officer_id == officer_id,
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    db.query(OfficerChatMessage).filter(OfficerChatMessage.session_id == session_id).delete()
+    db.delete(session)
+    db.commit()
+
+    return {"success": True, "message": f"Session {session_id} deleted."}
+
+
+# ─────────────────────────────────────────────
+# Officer Chat – Primary AI Response Generator
+# ─────────────────────────────────────────────
+
+def _generate_officer_chat_response(
+    question: str,
+    portfolio_summary: str,
+    loan_context: str,
+    history: str,
+    db: Session,
+    loan_id: Optional[str] = None,
+) -> str:
+    """
+    Calls Ollama with a proper multi-turn conversational prompt.
+    Falls back to _officer_fallback if Ollama is unavailable or returns empty.
+    """
+    try:
+        from backend.agents.llm_reasoning_agent import call_ollama, is_ollama_available
+
+        if not is_ollama_available():
+            return _officer_fallback(question, db, loan_id)
+
+        system_prompt = (
+            "You are a Collections Intelligence AI Assistant for bank officers at a collections department. "
+            "This is a multi-turn conversation. The conversation history is provided so you can understand "
+            "follow-up questions, corrections, and context from previous messages. "
+            "IMPORTANT RULES:\n"
+            "- Read the full conversation history before answering\n"
+            "- If the officer corrects a previous request, update your answer accordingly\n"
+            "- If the officer asks a follow-up like 'what are they?' refer to the prior AI response\n"
+            "- Never repeat the question back. Do not include labels like 'Officer:' or 'Answer:'\n"
+            "- Start your response directly with the answer\n"
+            "- Be concise (3-6 sentences), factual, and professional\n"
+            "- State exact figures (EMI, outstanding, DPD) from the data when asked\n"
+            "- Do not invent data not present in the context"
+        )
+
+        loan_section = f"\n\nLoan Data:\n{loan_context}" if loan_context else ""
+        history_section = (
+            f"\n\nConversation so far:\n{history.strip()}"
+            if history.strip()
+            else ""
+        )
+
+        prompt = (
+            f"Available Data:\n"
+            f"Portfolio: {portfolio_summary}"
+            f"{loan_section}"
+            f"{history_section}\n\n"
+            f"The officer now says: {question}\n\n"
+            f"Respond directly as the AI assistant, considering the full conversation above."
+        )
+
+        response = call_ollama(prompt, system_prompt)
+        if response and response.strip():
+            # Strip any accidental "Officer:" / "AI:" / "Answer:" prefixes the LLM may add
+            cleaned = response.strip()
+            for prefix in ("Officer:", "AI:", "Answer:", "Assistant:"):
+                if cleaned.startswith(prefix):
+                    cleaned = cleaned[len(prefix):].lstrip()
+            return cleaned
+
+    except Exception as e:
+        print(f"[OfficerChat] LLM call failed: {e}")
+
+    # Ollama unavailable or returned empty — use structured fallback
+    return _officer_fallback(question, db, loan_id)
+
+
+# ─────────────────────────────────────────────
+# Officer Fallback Response
+# ─────────────────────────────────────────────
+
+def _officer_fallback(message: str, db: Session, loan_id: Optional[str] = None) -> str:
+    msg = message.lower()
+    all_loans = db.query(Loan).all()
+    high_risk = [l for l in all_loans if l.risk_segment == "High"]
+    medium_risk = [l for l in all_loans if l.risk_segment == "Medium"]
+    low_risk = [l for l in all_loans if l.risk_segment == "Low"]
+
+    if loan_id:
+        loan = db.query(Loan).filter(Loan.loan_id == loan_id).first()
+        if loan:
+            customer = db.query(Customer).filter(Customer.customer_id == loan.customer_id).first()
+            name = customer.customer_name if customer else "the customer"
+            if any(kw in msg for kw in ["grace", "approve", "eligible"]):
+                if loan.days_past_due < 30:
+                    return (f"For loan {loan_id} ({name}): With {loan.days_past_due} DPD, this customer may be eligible for a grace period. "
+                            f"Risk segment is {loan.risk_segment}. Recommend approving a short grace period with follow-up.")
+                return (f"Loan {loan_id} has {loan.days_past_due} DPD — grace approval should be carefully reviewed. "
+                        f"Consider restructuring instead.")
+            if any(kw in msg for kw in ["recovery", "strategy", "channel"]):
+                return (f"For loan {loan_id}: Recommended channel is {loan.recommended_channel}. "
+                        f"Self-cure probability: {(loan.self_cure_probability or 0)*100:.0f}%. "
+                        f"Risk: {loan.risk_segment}. Outstanding: ₹{loan.outstanding_balance:,.0f}.")
+            return (f"Loan {loan_id} belongs to {name}. Outstanding: ₹{loan.outstanding_balance:,.0f}, "
+                    f"DPD: {loan.days_past_due}, Risk: {loan.risk_segment}.")
+
+    if any(kw in msg for kw in ["high risk", "high-risk", "critical"]):
+        return (f"There are {len(high_risk)} high-risk loans in the portfolio. "
+                f"Total exposure: ₹{sum(l.outstanding_balance for l in high_risk):,.0f}. "
+                f"Immediate outreach is recommended for these accounts.")
+    if any(kw in msg for kw in ["total", "portfolio", "outstanding"]):
+        total = sum(l.outstanding_balance for l in all_loans)
+        return (f"Portfolio summary: {len(all_loans)} total loans. "
+                f"Total outstanding: ₹{total:,.0f}. "
+                f"Risk distribution — High: {len(high_risk)}, Medium: {len(medium_risk)}, Low: {len(low_risk)}.")
+    if any(kw in msg for kw in ["recovery", "strategy", "strateg"]):
+        return ("Best recovery strategies for the current portfolio:\n"
+                "1. High-risk accounts: Immediate phone outreach + restructuring offer.\n"
+                "2. Medium-risk accounts: Email/SMS reminders + grace period eligibility check.\n"
+                "3. Low-risk accounts: Automated payment reminders via preferred channel.")
+    return ("I can help you with portfolio analysis, loan-specific intelligence, recovery strategies, and customer insights. "
+            "Try asking about high-risk accounts, total outstanding, or specific loan IDs.")

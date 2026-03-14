@@ -102,7 +102,7 @@ export default function CustomerSearch() {
                 onChange={e => setFilters(f => ({ ...f, risk_segment: e.target.value }))}
                 className="w-full px-3 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
-                <option value="">All Segments</option>
+                <option value=""></option>
                 <option value="High">High</option>
                 <option value="Medium">Medium</option>
                 <option value="Low">Low</option>
@@ -206,76 +206,221 @@ export default function CustomerSearch() {
 }
 
 function LoanDetailModal({ loanId, onClose }) {
-  const [loan,    setLoan]    = useState(null);
+  const [data,    setData]    = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState('');
 
   useEffect(() => {
+    setData(null);
+    setLoading(true);
+    setError('');
     api.get(`/officer/loan-intelligence/${loanId}`)
-      .then(r => setLoan(r.data))
-      .catch(console.error)
+      .then(r => { setData(r.data); })
+      .catch(err => {
+        console.error('LoanDetailModal error:', err);
+        setError(err.response?.data?.detail || 'Failed to load loan details. Please try again.');
+      })
       .finally(() => setLoading(false));
   }, [loanId]);
 
-  if (loading) return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="bg-white rounded-2xl p-8">
-        <div className="animate-spin rounded-full h-10 w-10 border-4 border-blue-500 border-t-transparent mx-auto"></div>
-      </div>
-    </div>
-  );
-
-  const info = loan?.loan_info || {};
-  const risk = info.risk_segment;
   const riskMap = { High: 'bg-red-100 text-red-700', Medium: 'bg-yellow-100 text-yellow-700', Low: 'bg-green-100 text-green-700' };
 
+  // Backend returns: { loan: {...}, customer: {...}, analytics: {...}, llm_recommendation, ... }
+  const loan      = data?.loan      ?? {};
+  const customer  = data?.customer  ?? {};
+  const analytics = data?.analytics ?? {};
+  const risk      = analytics?.risk_segment;
+
+  const fmt = (val) => val != null ? `₹${Number(val).toLocaleString('en-IN')}` : '—';
+  const pct = (val) => val != null ? `${(Number(val) * 100).toFixed(0)}%` : '—';
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col">
-        <div className="flex items-center justify-between px-6 py-4 border-b">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4" onClick={onClose}>
+      <div
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b flex-shrink-0">
           <div className="flex items-center gap-3">
-            <h2 className="text-xl font-bold text-gray-800">Loan Intelligence</h2>
+            <h2 className="text-xl font-bold text-gray-800">🏦 Loan Intelligence</h2>
             <span className="font-bold text-blue-600">{loanId}</span>
-            {risk && <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${riskMap[risk] || 'bg-gray-100'}`}>{risk} Risk</span>}
+            {risk && (
+              <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${riskMap[risk] || 'bg-gray-100 text-gray-600'}`}>
+                {risk} Risk
+              </span>
+            )}
           </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-2xl leading-none">✕</button>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-700 text-2xl leading-none font-light">✕</button>
         </div>
-        <div className="overflow-y-auto p-6 space-y-4">
-          {!loan ? (
-            <p className="text-gray-400 text-center">No data available.</p>
+
+        {/* Body */}
+        <div className="overflow-y-auto p-6 space-y-4 flex-1">
+          {loading ? (
+            <div className="flex flex-col items-center justify-center py-12 gap-3">
+              <div className="animate-spin rounded-full h-12 w-12 border-4 border-blue-500 border-t-transparent"></div>
+              <p className="text-sm text-gray-400">Loading loan details…</p>
+            </div>
+          ) : error ? (
+            <div className="flex flex-col items-center py-8 gap-3">
+              <span className="text-4xl">⚠️</span>
+              <p className="text-red-600 font-semibold">{error}</p>
+              <button
+                onClick={() => { setLoading(true); setError(''); api.get(`/officer/loan-intelligence/${loanId}`).then(r => setData(r.data)).catch(e => setError(e.response?.data?.detail || 'Failed to load.')).finally(() => setLoading(false)); }}
+                className="text-sm bg-blue-600 text-white px-4 py-2 rounded-xl hover:bg-blue-700"
+              >
+                Retry
+              </button>
+            </div>
+          ) : !data ? (
+            <p className="text-gray-400 text-center py-8">No data available for this loan.</p>
           ) : (
             <>
-              <div className="bg-gray-50 rounded-xl p-4 grid grid-cols-2 md:grid-cols-3 gap-4">
-                <MiniDetail label="Customer"      value={info.customer_name} />
-                <MiniDetail label="Loan Type"     value={info.loan_type} />
-                <MiniDetail label="Loan Amount"   value={`₹${info.loan_amount?.toLocaleString('en-IN')}`} />
-                <MiniDetail label="Outstanding"   value={`₹${info.outstanding_balance?.toLocaleString('en-IN')}`} />
-                <MiniDetail label="EMI Amount"    value={`₹${info.emi_amount?.toLocaleString('en-IN')}`} />
-                <MiniDetail label="Days Past Due" value={info.days_past_due} highlight={info.days_past_due > 0} />
-                <MiniDetail label="Interest Rate" value={`${info.interest_rate}%`} />
-                <MiniDetail label="EMI Due Date"  value={info.emi_due_date} />
-                <MiniDetail label="Loan Status"   value={info.loan_status} />
+              {/* ── Loan Details ── */}
+              <div>
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Loan Details</p>
+                <div className="bg-gray-50 rounded-xl p-4 grid grid-cols-2 md:grid-cols-3 gap-4">
+                  <MiniDetail label="Loan Type"     value={loan.loan_type} />
+                  <MiniDetail label="Loan Amount"   value={fmt(loan.loan_amount)} />
+                  <MiniDetail label="Outstanding"   value={fmt(loan.outstanding_balance)} />
+                  <MiniDetail label="EMI Amount"    value={fmt(loan.emi_amount)} />
+                  <MiniDetail label="Interest Rate" value={loan.interest_rate != null ? `${loan.interest_rate}%` : '—'} />
+                  <MiniDetail label="EMI Due Date"  value={loan.emi_due_date || '—'} />
+                  <MiniDetail label="Days Past Due" value={loan.days_past_due ?? '—'} highlight={(loan.days_past_due ?? 0) > 0} />
+                </div>
               </div>
-              {loan.analytics && (
-                <div className="bg-blue-50 rounded-xl p-4">
-                  <p className="text-xs font-semibold text-blue-700 mb-2 uppercase tracking-wide">Analytics</p>
-                  <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                    <MiniDetail label="Self-Cure Prob."   value={`${(loan.analytics.self_cure_probability * 100).toFixed(0)}%`} />
-                    <MiniDetail label="Recovery Strategy" value={loan.analytics.recovery_strategy} />
-                    <MiniDetail label="Rec. Channel"      value={loan.analytics.recommended_channel} />
+
+              {/* ── Customer Details ── */}
+              <div>
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Customer</p>
+                <div className="bg-gray-50 rounded-xl p-4 grid grid-cols-2 md:grid-cols-3 gap-4">
+                  <MiniDetail label="Name"         value={customer.customer_name} />
+                  <MiniDetail label="Credit Score" value={customer.credit_score} />
+                  <MiniDetail label="Monthly Income" value={fmt(customer.monthly_income)} />
+                  <MiniDetail label="Mobile"       value={customer.mobile_number} />
+                  <MiniDetail label="Email"        value={customer.email_id} />
+                  <MiniDetail label="Channel"      value={customer.preferred_channel} />
+                </div>
+              </div>
+
+              {/* ── Analytics ── */}
+              {data.analytics && (
+                <div>
+                  <p className="text-xs font-semibold text-blue-600 uppercase tracking-wide mb-2">📊 Analytics</p>
+                  <div className="bg-blue-50 rounded-xl p-4 grid grid-cols-2 md:grid-cols-3 gap-4">
+                    <MiniDetail label="Risk Segment"      value={analytics.risk_segment} />
+                    <MiniDetail label="Self-Cure Prob."   value={pct(analytics.self_cure_probability)} />
+                    <MiniDetail label="Delinquency Score" value={analytics.delinquency_score != null ? Number(analytics.delinquency_score).toFixed(0) : '—'} />
+                    <MiniDetail label="Value at Risk"     value={fmt(analytics.value_at_risk)} />
+                    <MiniDetail label="Payment Trend"     value={analytics.payment_trend?.trend ?? (typeof analytics.payment_trend === 'string' ? analytics.payment_trend : '—')} />
+                    <MiniDetail label="Rec. Channel"      value={analytics.recommended_channel || '—'} />
+                    <MiniDetail
+                      label="Recovery Strategy"
+                      value={
+                        typeof analytics.recovery_strategy === 'object'
+                          ? (analytics.recovery_strategy?.strategy ?? '—')
+                          : (analytics.recovery_strategy || '—')
+                      }
+                    />
+                    <MiniDetail
+                      label="Strategy Action"
+                      value={
+                        typeof analytics.recovery_strategy === 'object'
+                          ? (analytics.recovery_strategy?.action ?? '—')
+                          : '—'
+                      }
+                    />
                   </div>
                 </div>
               )}
-              {loan.recommendation && (
-                <div className="bg-green-50 rounded-xl p-4">
-                  <p className="text-xs font-semibold text-green-700 mb-1 uppercase tracking-wide">AI Recommendation</p>
-                  <p className="text-sm text-gray-700">{loan.recommendation}</p>
+
+              {/* ── AI Recommendation ── */}
+              {data.llm_recommendation && (
+                <div>
+                  <p className="text-xs font-semibold text-green-600 uppercase tracking-wide mb-2">🤖 AI Recommendation</p>
+                  <div className="bg-green-50 rounded-xl p-4">
+                    <p className="text-sm text-gray-700 leading-relaxed whitespace-pre-line">{data.llm_recommendation}</p>
+                  </div>
+                </div>
+              )}
+
+              {/* ── Policy Validation ── */}
+              {data.policy_validation && (
+                <div>
+                  <p className="text-xs font-semibold text-purple-600 uppercase tracking-wide mb-2">🛡️ Policy Check</p>
+                  <div className="bg-purple-50 rounded-xl p-4 text-sm text-gray-700 space-y-1">
+                    <p>
+                      <span className={`font-semibold ${data.policy_validation.approved ? 'text-green-600' : 'text-red-600'}`}>
+                        {data.policy_validation.approved ? '✅ Approved' : '❌ Not Approved'}
+                      </span>
+                      {data.policy_validation.requires_human_review && (
+                        <span className="ml-2 text-yellow-600 font-semibold">⚠️ Human Review Required</span>
+                      )}
+                    </p>
+                    {data.policy_validation.final_recommendation && (
+                      <p className="text-gray-600">{data.policy_validation.final_recommendation}</p>
+                    )}
+                    {data.policy_validation.warnings?.length > 0 && (
+                      <p className="text-yellow-600">⚠️ {data.policy_validation.warnings.join(', ')}</p>
+                    )}
+                    {data.policy_validation.violations?.length > 0 && (
+                      <p className="text-red-600">🚫 {data.policy_validation.violations.join(', ')}</p>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* ── Sentiment Summary ── */}
+              {data.sentiment && (
+                <div>
+                  <p className="text-xs font-semibold text-indigo-600 uppercase tracking-wide mb-2">💬 Customer Sentiment</p>
+                  <div className="bg-indigo-50 rounded-xl p-4 grid grid-cols-3 gap-4">
+                    <MiniDetail label="Avg Sentiment"    value={data.sentiment.average_sentiment != null ? Number(data.sentiment.average_sentiment).toFixed(2) : '—'} />
+                    <MiniDetail label="Dominant Tone"    value={data.sentiment.dominant_tonality || '—'} />
+                    <MiniDetail label="Sentiment Trend"  value={data.sentiment.sentiment_trend || '—'} />
+                  </div>
+                </div>
+              )}
+
+              {/* ── Recent Interactions ── */}
+              {data.interactions?.length > 0 && (
+                <div>
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">📞 Recent Interactions</p>
+                  <div className="space-y-2">
+                    {data.interactions.map((it, i) => (
+                      <div key={i} className="bg-gray-50 rounded-xl p-3 flex gap-3 items-start">
+                        <span className="text-lg flex-shrink-0">
+                          {it.interaction_type === 'Call' ? '📞' : it.interaction_type === 'Chat' ? '💬' : it.interaction_type === 'Email' ? '📧' : '📱'}
+                        </span>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 mb-0.5">
+                            <span className="text-xs font-semibold text-gray-700">{it.interaction_type}</span>
+                            <span className="text-xs text-gray-400">{it.interaction_time?.slice(0, 10)}</span>
+                            <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${
+                              it.tonality_score === 'Positive' ? 'bg-green-100 text-green-700'
+                              : it.tonality_score === 'Negative' ? 'bg-red-100 text-red-700'
+                              : 'bg-gray-100 text-gray-600'
+                            }`}>{it.tonality_score}</span>
+                          </div>
+                          <p className="text-xs text-gray-600 leading-relaxed">{it.interaction_summary}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </>
           )}
         </div>
-        <div className="px-6 py-4 border-t flex justify-end">
-          <button onClick={onClose} className="px-5 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-sm font-semibold">Close</button>
+
+        {/* Footer */}
+        <div className="px-6 py-4 border-t flex justify-end flex-shrink-0">
+          <button
+            onClick={onClose}
+            className="px-6 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-sm font-semibold transition-colors"
+          >
+            Close
+          </button>
         </div>
       </div>
     </div>
