@@ -214,12 +214,20 @@ def seed():
             recommended_channel="WhatsApp"
         ),
         Loan(
-            loan_id="LOAN007", customer_id="CUST001",
-            loan_type="Car Loan", loan_amount=600000.0, interest_rate=10.0,
-            emi_amount=13000.0, emi_due_date="2026-03-20",
-            outstanding_balance=480000.0, days_past_due=5,
-            risk_segment="Medium", self_cure_probability=0.60,
-            recommended_channel="WhatsApp"
+            loan_id="LOAN008", customer_id="CUST006",
+            loan_type="Personal Loan", loan_amount=250000.0, interest_rate=11.5,
+            emi_amount=7200.0, emi_due_date="2026-03-28",
+            outstanding_balance=210000.0, days_past_due=0,
+            risk_segment="Low", self_cure_probability=0.90,
+            recommended_channel="Email"
+        ),
+        Loan(
+            loan_id="LOAN007", customer_id="CUST003",
+            loan_type="Two Wheeler Loan", loan_amount=180000.0, interest_rate=13.0,
+            emi_amount=5200.0, emi_due_date="2026-03-22",
+            outstanding_balance=150000.0, days_past_due=2,
+            risk_segment="Medium", self_cure_probability=0.45,
+            recommended_channel="Email"
         ),
     ]
     db.add_all(loans)
@@ -265,7 +273,16 @@ def seed():
         PaymentHistory(loan_id="LOAN006", payment_date="2026-02-05", payment_amount=35000.0, payment_method="NEFT"),
         PaymentHistory(loan_id="LOAN006", payment_date="2026-01-05", payment_amount=35000.0, payment_method="NEFT"),
         PaymentHistory(loan_id="LOAN006", payment_date="2025-12-05", payment_amount=35000.0, payment_method="NEFT"),
-        PaymentHistory(loan_id="LOAN006", payment_date="2025-11-05", payment_amount=35000.0, payment_method="NEFT"),
+    PaymentHistory(loan_id="LOAN006", payment_date="2025-11-05", payment_amount=35000.0, payment_method="NEFT"),
+
+    # LOAN008 - CUST006 new loan
+    PaymentHistory(loan_id="LOAN008", payment_date="2026-03-02", payment_amount=7200.0, payment_method="UPI"),
+    PaymentHistory(loan_id="LOAN008", payment_date="2026-02-02", payment_amount=7200.0, payment_method="UPI"),
+    PaymentHistory(loan_id="LOAN008", payment_date="2026-01-02", payment_amount=7200.0, payment_method="NEFT"),
+
+    # LOAN007 - CUST003 new second loan
+    PaymentHistory(loan_id="LOAN007", payment_date="2026-03-01", payment_amount=5200.0, payment_method="UPI"),
+    PaymentHistory(loan_id="LOAN007", payment_date="2026-02-01", payment_amount=5200.0, payment_method="UPI"),
     ]
     db.add_all(payments)
 
