@@ -60,10 +60,10 @@ export default function CustomerDashboard() {
           color="blue"
         />
         <QuickAction
-          icon="🤖"
-          title="AI Assistant"
-          desc="Ask questions about your loans, EMI, grace period and more"
-          href="/customer/chat"
+          icon="💬"
+          title="Loan AI Chat"
+          desc="Go to Your Loans and tap 💬 Chat on any loan to ask AI questions about it"
+          href="/customer/loans"
           color="purple"
         />
         <QuickAction

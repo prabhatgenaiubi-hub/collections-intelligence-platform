@@ -17,7 +17,6 @@ export default function CustomerLayout() {
     { to: '/customer',             label: '🏠 Dashboard',          end: true },
     { to: '/customer/loans',       label: '📋 Your Loans' },
     { to: '/customer/preferences', label: '📡 Preferred Channel' },
-    { to: '/customer/chat',        label: '🤖 AI Assistant' },
   ];
 
   return (

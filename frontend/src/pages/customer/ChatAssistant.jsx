@@ -93,6 +93,29 @@ export default function ChatAssistant() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Extract a friendly name from the first assistant intro message, if present
+  const introMsg = messages.find(
+    (m) =>
+      m.role === 'assistant' &&
+      typeof m.message_text === 'string' &&
+      m.message_text.toLowerCase().includes("i'm your ai banking assistant")
+  );
+  let customerName = '';
+  if (introMsg?.message_text) {
+    const match = introMsg.message_text.match(/hello,?\s+([^!]+)!/i);
+    if (match && match[1]) {
+      customerName = match[1].trim();
+    }
+  }
+  const filteredMessages = messages.filter(
+    (m) =>
+      !(
+        m.role === 'assistant' &&
+        typeof m.message_text === 'string' &&
+        m.message_text.toLowerCase().includes("i'm your ai banking assistant")
+      )
+  );
+
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -177,6 +200,16 @@ export default function ChatAssistant() {
               </span>
             </div>
 
+            {/* Assistant intro banner (kept out of chat messages) */}
+            <div className="px-5 py-4 border-b bg-blue-50">
+              <p className="text-sm font-semibold text-blue-800">
+                Hello{customerName ? `, ${customerName}` : ''}! I'm your AI banking assistant.
+              </p>
+              <p className="text-xs text-blue-700 mt-1">
+                I can help with EMI payment information, outstanding balance queries, grace period eligibility, and loan restructuring options.
+              </p>
+            </div>
+
             {/* Messages */}
             <div className="flex-1 overflow-y-auto p-5 space-y-4">
               {loading && (
@@ -184,7 +217,7 @@ export default function ChatAssistant() {
                   <div className="animate-spin rounded-full h-6 w-6 border-2 border-blue-500 border-t-transparent"></div>
                 </div>
               )}
-              {messages.map((msg, idx) => (
+              {filteredMessages.map((msg, idx) => (
                 <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   {msg.role !== 'user' && (
                     <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs mr-2 flex-shrink-0 mt-1">

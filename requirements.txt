@@ -12,6 +12,19 @@ langchain-community==0.2.1
 langgraph==0.1.1
 ollama==0.2.0
 
+# Sentiment Analysis – RoBERTa (cardiffnlp/twitter-roberta-base-sentiment-latest)
+# Handles conversational/complaint language far better than FinBERT for customer chat.
+# torch and transformers are already installed via openai-whisper dependencies.
+transformers>=4.30.0
+torch>=2.0.0
+rapidfuzz>=3.0.0
+
+# Speech-to-Text (Voice Call Analysis)
+# NOTE: openai-whisper==20231117 has a broken setup.py on newer pip.
+# Install manually with: pip install openai-whisper
+# (already installed if you see it in pip list)
+ffmpeg-python==0.2.0
+
 # Vector DB
 chromadb==0.5.0
 

@@ -19,6 +19,7 @@ from backend.db.models import (
     Customer, Loan, PaymentHistory,
     InteractionHistory, GraceRequest, RestructureRequest,
     OfficerChatSession, OfficerChatMessage,
+    ChatSession, ChatMessage,
 )
 from backend.routers.auth import get_current_officer
 from backend.agents.collections_intelligence_agent import analyze_loan
@@ -733,12 +734,13 @@ def officer_send_message(
     low_risk    = [l for l in all_loans if l.risk_segment == "Low"]
     total_outstanding = sum(l.outstanding_balance for l in all_loans)
     overdue_loans = [l for l in all_loans if l.days_past_due > 0]
+    overdue_outstanding = sum(l.outstanding_balance for l in overdue_loans)
 
     portfolio_summary = (
         f"Portfolio: {len(all_loans)} total loans | "
         f"Outstanding: ₹{total_outstanding:,.0f} | "
         f"High Risk: {len(high_risk)} | Medium Risk: {len(medium_risk)} | Low Risk: {len(low_risk)} | "
-        f"Overdue: {len(overdue_loans)}"
+        f"Overdue Loans: {len(overdue_loans)} | Overdue Outstanding: ₹{overdue_outstanding:,.0f}"
     )
 
     # If loan_id provided, fetch specific loan data
@@ -860,6 +862,294 @@ def officer_delete_session(
 
 
 # ─────────────────────────────────────────────
+# GET /officer/customer/{customer_id}/interactions
+# Full interaction detail for officer modal view
+# ─────────────────────────────────────────────
+
+@router.get("/customer/{customer_id}/interactions")
+def get_customer_interactions(
+    customer_id:  str,
+    current_user: dict    = Depends(get_current_officer),
+    db:           Session = Depends(get_db),
+):
+    """
+    Returns full interaction detail for a customer:
+      - Chat: all chat sessions with full message threads (user + assistant bubbles)
+      - Call: all InteractionHistory rows of type Call with full transcript
+    Used by the officer sentiment modal pop-up.
+    """
+    customer = db.query(Customer).filter(Customer.customer_id == customer_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail=f"Customer {customer_id} not found.")
+
+    # ── Chat sessions: full thread per session ──────────────────
+    sessions = (
+        db.query(ChatSession)
+        .filter(ChatSession.customer_id == customer_id)
+        .order_by(ChatSession.last_updated.desc())
+        .all()
+    )
+
+    chat_sessions = []
+    for session in sessions:
+        messages = (
+            db.query(ChatMessage)
+            .filter(ChatMessage.session_id == session.session_id)
+            .order_by(ChatMessage.timestamp.asc())
+            .all()
+        )
+        # Skip sessions with only the system welcome message (no real user messages)
+        user_msgs = [m for m in messages if m.role == "user"]
+        if not user_msgs:
+            continue
+        chat_sessions.append({
+            "session_id":    session.session_id,
+            "session_title": session.session_title,
+            "created_at":    session.created_at,
+            "last_updated":  session.last_updated,
+            "messages": [
+                {
+                    "role":         m.role,
+                    "message_text": m.message_text,
+                    "timestamp":    m.timestamp,
+                }
+                for m in messages
+            ],
+        })
+
+    # ── Call interactions: full transcript per call ─────────────
+    call_interactions = (
+        db.query(InteractionHistory)
+        .filter(
+            InteractionHistory.customer_id      == customer_id,
+            InteractionHistory.interaction_type == "Call",
+        )
+        .order_by(InteractionHistory.interaction_time.desc())
+        .all()
+    )
+
+    calls = [
+        {
+            "interaction_id":      i.interaction_id,
+            "interaction_time":    i.interaction_time,
+            "sentiment_score":     i.sentiment_score,
+            "tonality_score":      i.tonality_score,
+            "interaction_summary": i.interaction_summary,
+            "conversation_text":   i.conversation_text,   # full Whisper transcript
+        }
+        for i in call_interactions
+    ]
+
+    return {
+        "customer_id":   customer_id,
+        "customer_name": customer.customer_name,
+        "chat_sessions": chat_sessions,
+        "calls":         calls,
+    }
+
+
+# ─────────────────────────────────────────────
+# GET /officer/sentiment
+# Portfolio-level + per-customer sentiment
+# ─────────────────────────────────────────────
+
+@router.get("/sentiment")
+def get_portfolio_sentiment(
+    current_user: dict = Depends(get_current_officer),
+    db: Session        = Depends(get_db),
+):
+    """
+    Return sentiment overview:
+      - Portfolio-level aggregation (positive/neutral/negative counts + %)
+      - Per-customer latest sentiment + trend
+    """
+    from backend.agents.sentiment_agent import aggregate_sentiment, classify_tonality
+
+    all_customers = db.query(Customer).all()
+    # Only consider real data sources: live Chat and uploaded Call recordings.
+    # Email / SMS / WhatsApp are excluded — we have no real pipeline for those.
+    VALID_TYPES = {"Chat", "Call"}
+    all_interactions = [
+        i for i in db.query(InteractionHistory).all()
+        if i.interaction_type in VALID_TYPES
+    ]
+
+    # Portfolio-level totals
+    total = len(all_interactions)
+    pos   = sum(1 for i in all_interactions if i.tonality_score == "Positive")
+    neu   = sum(1 for i in all_interactions if i.tonality_score == "Neutral")
+    neg   = sum(1 for i in all_interactions if i.tonality_score == "Negative")
+
+    portfolio_summary = {
+        "total_interactions": total,
+        "positive":  pos,
+        "neutral":   neu,
+        "negative":  neg,
+        "positive_pct": round(pos / total * 100, 1) if total else 0,
+        "neutral_pct":  round(neu / total * 100, 1) if total else 0,
+        "negative_pct": round(neg / total * 100, 1) if total else 0,
+    }
+
+    # Per-customer sentiment
+    customer_sentiments = []
+    for cust in all_customers:
+        interactions = [
+            i for i in all_interactions if i.customer_id == cust.customer_id
+        ]
+        interaction_dicts = [
+            {"sentiment_score": i.sentiment_score, "tonality_score": i.tonality_score}
+            for i in sorted(interactions, key=lambda x: x.interaction_time)
+        ]
+        agg  = aggregate_sentiment(interaction_dicts)
+        last = sorted(interactions, key=lambda x: x.interaction_time, reverse=True)
+
+        # Last-3 sentiment — what matters most for collections officers
+        last3       = last[:3]
+        last3_dicts = [
+            {"sentiment_score": i.sentiment_score, "tonality_score": i.tonality_score}
+            for i in last3
+        ]
+        agg3 = aggregate_sentiment(last3_dicts)
+
+        customer_sentiments.append({
+            "customer_id":        cust.customer_id,
+            "customer_name":      cust.customer_name,
+            "total_interactions": len(interactions),
+            # All-time aggregate
+            "average_sentiment":  agg["average_sentiment"],
+            "dominant_tonality":  agg["dominant_tonality"],
+            "sentiment_trend":    agg["sentiment_trend"],
+            # Last-3 aggregate (shown in card header)
+            "last3_sentiment":    agg3["average_sentiment"],
+            "last3_tonality":     agg3["dominant_tonality"],
+            "last3_trend":        agg3["sentiment_trend"],
+            "last_interaction":   last[0].interaction_time if last else None,
+            "last_tonality":      last[0].tonality_score  if last else "N/A",
+            "recent_interactions": [
+                {
+                    "interaction_type":    i.interaction_type,
+                    "interaction_time":    i.interaction_time,
+                    "sentiment_score":     i.sentiment_score,
+                    "tonality_score":      i.tonality_score,
+                    "interaction_summary": i.interaction_summary,
+                }
+                for i in last3          # only last 3
+            ],
+        })
+
+    # Sort: worst last-3 sentiment first (most at-risk based on recent behaviour)
+    customer_sentiments.sort(key=lambda x: x["last3_sentiment"])
+
+    return {
+        "portfolio_sentiment": portfolio_summary,
+        "customers":           customer_sentiments,
+    }
+
+
+# ─────────────────────────────────────────────
+# POST /officer/sentiment/analyze-call
+# Upload voice file → Whisper transcribe → sentiment
+# ─────────────────────────────────────────────
+
+from fastapi import UploadFile, File, Form
+import tempfile, os
+
+@router.post("/sentiment/analyze-call")
+async def analyze_call_sentiment(
+    customer_id:   str        = Form(...),
+    audio_file:    UploadFile = File(...),
+    current_user:  dict       = Depends(get_current_officer),
+    db:            Session    = Depends(get_db),
+):
+    """
+    Officer uploads a call recording (.mp3 / .wav / .m4a).
+    Pipeline:
+      1. Save audio to a temp file
+      2. Transcribe with Whisper (base model, local, no API key)
+      3. Run sentiment analysis on transcript
+      4. Store in InteractionHistory as type "Call"
+      5. Return transcript + sentiment result
+    """
+    from backend.agents.sentiment_agent import (
+        calculate_sentiment_score, classify_tonality,
+        generate_interaction_summary, analyze_and_store_interaction,
+    )
+
+    # Validate customer exists
+    customer = db.query(Customer).filter(Customer.customer_id == customer_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail=f"Customer {customer_id} not found.")
+
+    # Validate file type
+    allowed_extensions = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm"}
+    _, ext = os.path.splitext(audio_file.filename or "")
+    # For browser recordings sent as .webm (no extension in filename), fallback to .webm
+    if not ext:
+        ext = ".webm"
+    if ext.lower() not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext}'. Allowed: {', '.join(allowed_extensions)}"
+        )
+
+    # Save to temp file
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            content = await audio_file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save audio file: {e}")
+
+    # Transcribe with Whisper
+    try:
+        import whisper
+        model = whisper.load_model("base")          # ~150 MB, cached after first download
+        result = model.transcribe(tmp_path)
+        transcript = result.get("text", "").strip()
+    except ImportError:
+        os.unlink(tmp_path)
+        raise HTTPException(
+            status_code=501,
+            detail="Whisper is not installed. Run: pip install openai-whisper"
+        )
+    except Exception as e:
+        os.unlink(tmp_path)
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {e}")
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+    if not transcript:
+        raise HTTPException(status_code=422, detail="Whisper returned an empty transcript. Check audio quality.")
+
+    # Run sentiment pipeline + store in DB
+    try:
+        result_data = analyze_and_store_interaction(
+            db               = db,
+            customer_id      = customer_id,
+            interaction_type = "Call",
+            conversation_text= transcript,
+            customer_name    = customer.customer_name,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sentiment analysis failed: {e}")
+
+    return {
+        "success":             True,
+        "customer_id":         customer_id,
+        "customer_name":       customer.customer_name,
+        "transcript":          transcript,
+        "sentiment_score":     result_data["sentiment_score"],
+        "tonality":            result_data["tonality_score"],
+        "interaction_summary": result_data["interaction_summary"],
+        "interaction_id":      result_data["interaction_id"],
+    }
+
+
+# ─────────────────────────────────────────────
 # Officer Chat – Primary AI Response Generator
 # ─────────────────────────────────────────────
 
@@ -891,9 +1181,12 @@ def _generate_officer_chat_response(
             "- If the officer asks a follow-up like 'what are they?' refer to the prior AI response\n"
             "- Never repeat the question back. Do not include labels like 'Officer:' or 'Answer:'\n"
             "- Start your response directly with the answer\n"
-            "- Be concise (3-6 sentences), factual, and professional\n"
+            "- Be concise: maximum 4 sentences. Do not pad with generic advice\n"
+            "- Only use numbers and facts explicitly present in the provided data\n"
+            "- Never invent, estimate, or calculate values not given — if a figure is missing, say so\n"
+            "- Do not use numbered lists or bullet points unless the officer specifically asks for a list\n"
             "- State exact figures (EMI, outstanding, DPD) from the data when asked\n"
-            "- Do not invent data not present in the context"
+            "- Do not give generic banking advice; base every answer strictly on the provided portfolio data"
         )
 
         loan_section = f"\n\nLoan Data:\n{loan_context}" if loan_context else ""
@@ -961,6 +1254,17 @@ def _officer_fallback(message: str, db: Session, loan_id: Optional[str] = None) 
         return (f"There are {len(high_risk)} high-risk loans in the portfolio. "
                 f"Total exposure: ₹{sum(l.outstanding_balance for l in high_risk):,.0f}. "
                 f"Immediate outreach is recommended for these accounts.")
+    if any(kw in msg for kw in ["overdue", "past due", "delinquent", "summary of overdue"]):
+        overdue = [l for l in all_loans if l.days_past_due > 0]
+        overdue_total = sum(l.outstanding_balance for l in overdue)
+        overdue_lines = "\n".join(
+            f"  • {l.loan_id}: ₹{l.outstanding_balance:,.0f} outstanding, {l.days_past_due} DPD, {l.risk_segment} risk"
+            for l in sorted(overdue, key=lambda x: -x.days_past_due)
+        )
+        return (
+            f"There are {len(overdue)} overdue loans with a total outstanding of ₹{overdue_total:,.0f}.\n"
+            f"{overdue_lines}"
+        )
     if any(kw in msg for kw in ["total", "portfolio", "outstanding"]):
         total = sum(l.outstanding_balance for l in all_loans)
         return (f"Portfolio summary: {len(all_loans)} total loans. "
