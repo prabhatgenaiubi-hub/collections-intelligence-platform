@@ -11,19 +11,25 @@ class ContextBuilder:
     """
 
     @staticmethod
-    def build_context(db: Session, session_id: str, user_message: str, top_k_memories: int = 3) -> str:
+    def build_context(
+        db: Session,
+        session_id: str,
+        user_message: str,
+        top_k_memories: int = 3,
+        loan_id: str = None,          # ← NEW: scope to a specific loan
+    ) -> str:
         # Fetch session and customer
         session = db.query(ChatSession).filter(ChatSession.session_id == session_id).first()
         if not session:
             return f"User Question:\n{user_message.strip()}"
 
         customer = db.query(Customer).filter(Customer.customer_id == session.customer_id).first()
-        loan = (
-            db.query(Loan)
-            .filter(Loan.customer_id == session.customer_id)
-            .order_by(Loan.emi_due_date.desc())
-            .first()
-        )
+
+        # ── Fetch the correct loan ────────────────────────────────
+        loan_q = db.query(Loan).filter(Loan.customer_id == session.customer_id)
+        if loan_id:
+            loan_q = loan_q.filter(Loan.loan_id == loan_id.strip().upper())
+        loan = loan_q.order_by(Loan.emi_due_date.desc()).first()
 
         # Preferences
         prefs = (
@@ -70,8 +76,11 @@ class ContextBuilder:
         # System context lines
         system_ctx = [
             f"Customer Name: {customer.customer_name if customer else 'N/A'}",
-            f"Loan Number: {loan.loan_id if loan else 'N/A'}",
+            f"ACTIVE LOAN (answer ONLY about this loan): {loan.loan_id if loan else 'N/A'}",
+            f"Loan Type: {loan.loan_type if loan else 'N/A'}",
             f"EMI Amount: {f'₹{loan.emi_amount:,.0f}' if loan else 'N/A'}",
+            f"EMI Due Date: {loan.emi_due_date if loan else 'N/A'}",
+            f"Outstanding Balance: {f'₹{loan.outstanding_balance:,.0f}' if loan else 'N/A'}",
             f"Preferred Channel: {preference_entries.get('preferred_channel') or (customer.preferred_channel if customer else 'N/A')}",
         ]
         for k, v in preference_entries.items():
@@ -79,8 +88,16 @@ class ContextBuilder:
                 continue
             system_ctx.append(f"Preference - {k}: {v}")
 
+        # Strong instruction to prevent cross-loan context bleed
+        scope_instruction = (
+            f"\n[IMPORTANT] You are assisting with loan {loan.loan_id if loan else 'N/A'} ONLY. "
+            "Do not reference or answer about any other loan, even if it appears in your memories. "
+            "If the user asks about a different loan, redirect them to open that loan's chat."
+        )
+
         prompt = (
-            "System Context:\n" + "\n".join(system_ctx) + "\n\n" +
+            "System Context:\n" + "\n".join(system_ctx) + "\n" +
+            scope_instruction + "\n\n" +
             "Relevant Memories:\n" + memory_block + "\n\n" +
             "Conversation History:\n" + history + "\n\n" +
             "User Question:\n" + user_message.strip()

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import api from '../../api';
+import LoanChat from '../../components/LoanChat';
 
 const statusBadge = (status) => {
   const map = {
@@ -26,6 +27,7 @@ export default function CustomerLoans() {
   const [submitting, setSubmitting] = useState({});
   const [message, setMessage] = useState('');
   const [selectedLoan, setSelectedLoan] = useState(null); // for modal
+  const [chatLoan,     setChatLoan]     = useState(null); // for inline loan chat
 
   useEffect(() => {
     api.get('/customer/loans')
@@ -130,6 +132,12 @@ export default function CustomerLoans() {
                   >
                     View Details →
                   </button>
+                  <button
+                    onClick={() => setChatLoan(loan)}
+                    className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-xs font-semibold rounded-xl transition-colors"
+                  >
+                    💬 Chat
+                  </button>
                 </div>
               </div>
             </div>
@@ -140,6 +148,11 @@ export default function CustomerLoans() {
       {/* Loan Detail Modal */}
       {selectedLoan && (
         <LoanDetailModal loan={selectedLoan} onClose={() => setSelectedLoan(null)} />
+      )}
+
+      {/* Loan-scoped AI Chat slide-over */}
+      {chatLoan && (
+        <LoanChat loan={chatLoan} onClose={() => setChatLoan(null)} />
       )}
     </div>
   );

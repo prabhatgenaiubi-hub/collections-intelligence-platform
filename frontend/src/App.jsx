@@ -5,7 +5,6 @@ import CustomerDashboard from './pages/customer/CustomerDashboard';
 import CustomerLoans from './pages/customer/CustomerLoans';
 import LoanDetail from './pages/customer/LoanDetail';
 import Preferences from './pages/customer/Preferences';
-import ChatAssistant from './pages/customer/ChatAssistant';
 import OfficerLayout from './pages/officer/OfficerLayout';
 import OfficerDashboard from './pages/officer/OfficerDashboard';
 import CustomerSearch from './pages/officer/CustomerSearch';
@@ -13,6 +12,7 @@ import LoanIntelligence from './pages/officer/LoanIntelligence';
 import GraceManagement from './pages/officer/GraceManagement';
 import RestructureManagement from './pages/officer/RestructureManagement';
 import OfficerChat from './pages/officer/OfficerChat';
+import SentimentAnalysis from './pages/officer/SentimentAnalysis';
 
 // Auth guard
 function PrivateRoute({ children, role }) {
@@ -43,7 +43,6 @@ export default function App() {
           <Route path="loans" element={<CustomerLoans />} />
           <Route path="loans/:loanId" element={<LoanDetail />} />
           <Route path="preferences" element={<Preferences />} />
-          <Route path="chat" element={<ChatAssistant />} />
         </Route>
 
         {/* Officer Portal */}
@@ -62,6 +61,7 @@ export default function App() {
           <Route path="grace" element={<GraceManagement />} />
           <Route path="restructure" element={<RestructureManagement />} />
           <Route path="chat" element={<OfficerChat />} />
+          <Route path="sentiment" element={<SentimentAnalysis />} />
         </Route>
 
         {/* Fallback */}

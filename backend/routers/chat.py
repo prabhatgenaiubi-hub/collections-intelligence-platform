@@ -251,6 +251,11 @@ def send_message(
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # ── Compute live sentiment on the user message ─────────────────
+    from backend.agents.sentiment_agent import calculate_sentiment_score, classify_tonality
+    user_sentiment_score  = calculate_sentiment_score(body.message.strip())
+    user_sentiment_label  = classify_tonality(user_sentiment_score)
+
     # ── Extract and persist structured memory (preferences) ───────
     try:
         MemoryExtractor.process_message(
@@ -273,18 +278,48 @@ def send_message(
 
     # ── Special deterministic handling: conversation recall + EMI ──
     msg_lower = body.message.strip().lower()
+
+    # If a loan_id was passed, scope all deterministic answers to that loan only
+    scoped_loan_id = body.loan_id.strip().upper() if body.loan_id else None
+
     recall_phrases = [
         "what did i ask earlier",
         "have i asked anything",
         "asked anything earlier",
         "list the questions",
         "what question did i ask",
+        # broader natural-language variations
+        "previous question",
+        "previous questions",
+        "what have i asked",
+        "questions i asked",
+        "questions that i have asked",
+        "asked to you",
+        "i asked to you",
+        "what i asked",
+        "what i have asked",
+        "history of questions",
+        "what questions have i",
     ]
     is_history_question = any(phrase in msg_lower for phrase in recall_phrases)
     is_emi_question     = "what is my emi" in msg_lower or "emi amount" in msg_lower
     needs_loan_number   = "loan number" in msg_lower or "loan id" in msg_lower
     is_grace_question   = "grace" in msg_lower or "extension" in msg_lower
     is_outstanding_question = any(kw in msg_lower for kw in ["outstanding", "balance", "total due", "amount due"])
+    is_payment_question = any(kw in msg_lower for kw in [
+        "last payment",
+        "previous payment",
+        "payment history",
+        "payment done",
+        "payments done",
+        "payment made",
+        "payments made",
+        "payment record",
+        "payment details",
+        "paid so far",
+        "paid till",
+        "how much paid",
+    ])
     is_restructure_question = any(
         kw in msg_lower
         for kw in [
@@ -350,6 +385,18 @@ def send_message(
             "what question did i ask",
             "what did we discuss",
             "conversation summary",
+            # new recall variants — must not appear as "banking questions"
+            "previous question",
+            "previous questions",
+            "what have i asked",
+            "questions i asked",
+            "questions that i have asked",
+            "asked to you",
+            "i asked to you",
+            "what i asked",
+            "what i have asked",
+            "history of questions",
+            "what questions have i",
         ]
         banking_keywords = [
             "loan",
@@ -399,12 +446,10 @@ def send_message(
             ai_response = "You have not asked any banking-related questions yet in this conversation."
 
     elif is_loans_list_question:
-        loans = (
-            db.query(Loan)
-            .filter(Loan.customer_id == customer_id)
-            .order_by(Loan.emi_due_date.desc())
-            .all()
-        )
+        loans_q = db.query(Loan).filter(Loan.customer_id == customer_id)
+        if scoped_loan_id:
+            loans_q = loans_q.filter(Loan.loan_id == scoped_loan_id)
+        loans = loans_q.order_by(Loan.emi_due_date.desc()).all()
         if loans:
             summary = _format_loans(loans)
             ai_response = (
@@ -416,12 +461,10 @@ def send_message(
 
     elif is_emi_question:
         try:
-            loans = (
-                db.query(Loan)
-                .filter(Loan.customer_id == customer_id)
-                .order_by(Loan.emi_due_date.desc())
-                .all()
-            )
+            loans_q = db.query(Loan).filter(Loan.customer_id == customer_id)
+            if scoped_loan_id:
+                loans_q = loans_q.filter(Loan.loan_id == scoped_loan_id)
+            loans = loans_q.order_by(Loan.emi_due_date.desc()).all()
             if loans:
                 if len(loans) == 1:
                     loan = loans[0]
@@ -438,16 +481,14 @@ def send_message(
                 ai_response = "I could not find any loan details for your account."
         except Exception as e:
             print(f"[ChatRouter] EMI lookup failed: {e}")
-            ai_response = "I'm having trouble processing your request right now."  # Only on true backend error
+            ai_response = "I'm having trouble processing your request right now."
 
     elif is_outstanding_question:
         try:
-            loans = (
-                db.query(Loan)
-                .filter(Loan.customer_id == customer_id)
-                .order_by(Loan.emi_due_date.desc())
-                .all()
-            )
+            loans_q = db.query(Loan).filter(Loan.customer_id == customer_id)
+            if scoped_loan_id:
+                loans_q = loans_q.filter(Loan.loan_id == scoped_loan_id)
+            loans = loans_q.order_by(Loan.emi_due_date.desc()).all()
             if loans:
                 total_outstanding = sum(l.outstanding_balance for l in loans)
                 if len(loans) == 1:
@@ -469,14 +510,48 @@ def send_message(
             print(f"[ChatRouter] Outstanding lookup failed: {e}")
             ai_response = "I'm having trouble retrieving your outstanding balance right now."
 
+    elif is_payment_question:
+        try:
+            from backend.db.models import PaymentHistory
+            # Determine which loan(s) to query
+            loans_q = db.query(Loan).filter(Loan.customer_id == customer_id)
+            if scoped_loan_id:
+                loans_q = loans_q.filter(Loan.loan_id == scoped_loan_id)
+            loans = loans_q.all()
+
+            if not loans:
+                ai_response = "I could not find any loan details for your account."
+            else:
+                all_parts = []
+                for loan in loans:
+                    payments = (
+                        db.query(PaymentHistory)
+                        .filter(PaymentHistory.loan_id == loan.loan_id)
+                        .order_by(PaymentHistory.payment_date.desc())
+                        .all()
+                    )
+                    if not payments:
+                        all_parts.append(f"No payment records found for loan {loan.loan_id}.")
+                    else:
+                        header = f"Payment history for {loan.loan_id} ({loan.loan_type}):"
+                        rows = []
+                        for p in payments:
+                            rows.append(
+                                f"  • {p.payment_date} — ₹{p.payment_amount:,.0f} via {p.payment_method}"
+                            )
+                        all_parts.append(header + "\n" + "\n".join(rows))
+
+                ai_response = "\n\n".join(all_parts)
+        except Exception as e:
+            print(f"[ChatRouter] Payment history lookup failed: {e}")
+            ai_response = "I'm having trouble retrieving your payment history right now."
+
     elif is_grace_question or is_restructure_question:
         try:
-            loans = (
-                db.query(Loan)
-                .filter(Loan.customer_id == customer_id)
-                .order_by(Loan.emi_due_date.desc())
-                .all()
-            )
+            loans_q = db.query(Loan).filter(Loan.customer_id == customer_id)
+            if scoped_loan_id:
+                loans_q = loans_q.filter(Loan.loan_id == scoped_loan_id)
+            loans = loans_q.order_by(Loan.emi_due_date.desc()).all()
             if not loans:
                 ai_response = "I could not find any loan details for your account."
             else:
@@ -514,13 +589,17 @@ def send_message(
             session_id=session_id,
             user_message=body.message.strip(),
             top_k_memories=3,
+            loan_id=scoped_loan_id,       # ← scope the LLM to this loan
         )
 
         try:
             if is_ollama_available():
                 system_prompt = (
-                    "You are a helpful banking virtual assistant. Use only the provided context. "
-                    "If information is missing, say so briefly. Be concise and factual."
+                    "You are a helpful banking virtual assistant. "
+                    "Answer ONLY about the loan marked as ACTIVE LOAN in the System Context. "
+                    "Never mention or answer about any other loan. "
+                    "Use only the provided context. If information is missing, say so briefly. "
+                    "Be concise and factual."
                 )
                 ai_response = call_ollama(prompt=context_prompt, system_prompt=system_prompt)
         except Exception as e:
@@ -573,13 +652,30 @@ def send_message(
     except Exception as e:
         print(f"[ChatRouter] Vector store failed (non-critical): {e}")
 
+    # ── Persist sentiment to InteractionHistory (feeds officer dashboard) ─
+    try:
+        from backend.agents.sentiment_agent import analyze_and_store_interaction
+        customer = db.query(Customer).filter(Customer.customer_id == customer_id).first()
+        customer_name = customer.customer_name if customer else "Unknown"
+        analyze_and_store_interaction(
+            db               = db,
+            customer_id      = customer_id,
+            interaction_type = "Chat",
+            conversation_text= body.message.strip(),
+            customer_name    = customer_name,
+        )
+    except Exception as e:
+        print(f"[ChatRouter] InteractionHistory store failed (non-critical): {e}")
+
     return {
         "success":       True,
         "session_id":    session_id,
         "user_message": {
-            "role":         "user",
-            "message_text": body.message.strip(),
-            "timestamp":    now,
+            "role":            "user",
+            "message_text":    body.message.strip(),
+            "timestamp":       now,
+            "sentiment_score": user_sentiment_score,
+            "sentiment_label": user_sentiment_label,
         },
         "ai_response": {
             "message_id":   assistant_msg.message_id,

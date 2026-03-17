@@ -12,11 +12,12 @@ export default function OfficerLayout() {
   };
 
   const navItems = [
-    { to: '/officer',            label: '📊 Dashboard',         end: true },
-    { to: '/officer/search',     label: '🔍 Customer Search' },
-    { to: '/officer/grace',      label: '⏱ Grace Requests' },
-    { to: '/officer/restructure',label: '🔄 Restructure Requests' },
-    { to: '/officer/chat',       label: '💬 AI Chat Assistant' },
+    { to: '/officer',             label: '📊 Dashboard',         end: true },
+    { to: '/officer/search',      label: '🔍 Customer Search' },
+    { to: '/officer/grace',       label: '⏱ Grace Requests' },
+    { to: '/officer/restructure', label: '🔄 Restructure Requests' },
+    { to: '/officer/sentiment',   label: '🧠 Sentiment Analysis' },
+    { to: '/officer/chat',        label: '💬 AI Chat Assistant' },
   ];
 
   return (
