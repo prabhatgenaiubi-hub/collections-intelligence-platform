@@ -21,9 +21,7 @@ from typing import Optional
 from backend.db.database import get_db
 from backend.db.models import ChatSession, ChatMessage, Customer, Loan
 from backend.routers.auth import get_current_customer
-from backend.services.context_builder import ContextBuilder
-from backend.app.services.memory_extractor import MemoryExtractor
-from backend.agents.llm_reasoning_agent import call_ollama, is_ollama_available
+from backend.langgraph.workflow import run_chat_response
 
 router = APIRouter(prefix="/chat", tags=["Chat Assistant"])
 
@@ -239,32 +237,10 @@ def send_message(
     if not session:
         raise HTTPException(status_code=404, detail=f"Chat session {session_id} not found.")
 
-    # Check if assistant has already responded in this session
-    assistant_count = db.query(ChatMessage).filter(
-        ChatMessage.session_id == session_id,
-        ChatMessage.role == "assistant"
-    ).count()
-    is_first_assistant_reply = assistant_count == 0
-
     if not body.message or not body.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty.")
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # ── Compute live sentiment on the user message ─────────────────
-    from backend.agents.sentiment_agent import calculate_sentiment_score, classify_tonality
-    user_sentiment_score  = calculate_sentiment_score(body.message.strip())
-    user_sentiment_label  = classify_tonality(user_sentiment_score)
-
-    # ── Extract and persist structured memory (preferences) ───────
-    try:
-        MemoryExtractor.process_message(
-            db=db,
-            customer_id=customer_id,
-            user_message=body.message.strip(),
-        )
-    except Exception as e:
-        print(f"[ChatRouter] Memory extraction failed (non-critical): {e}")
 
     # ── Save user message ─────────────────────────────────────────
     user_msg = ChatMessage(
@@ -276,346 +252,23 @@ def send_message(
     db.add(user_msg)
     db.commit()
 
-    # ── Special deterministic handling: conversation recall + EMI ──
-    msg_lower = body.message.strip().lower()
-
-    # If a loan_id was passed, scope all deterministic answers to that loan only
-    scoped_loan_id = body.loan_id.strip().upper() if body.loan_id else None
-
-    recall_phrases = [
-        "what did i ask earlier",
-        "have i asked anything",
-        "asked anything earlier",
-        "list the questions",
-        "what question did i ask",
-        # broader natural-language variations
-        "previous question",
-        "previous questions",
-        "what have i asked",
-        "questions i asked",
-        "questions that i have asked",
-        "asked to you",
-        "i asked to you",
-        "what i asked",
-        "what i have asked",
-        "history of questions",
-        "what questions have i",
-    ]
-    is_history_question = any(phrase in msg_lower for phrase in recall_phrases)
-    is_emi_question     = "what is my emi" in msg_lower or "emi amount" in msg_lower
-    needs_loan_number   = "loan number" in msg_lower or "loan id" in msg_lower
-    is_grace_question   = "grace" in msg_lower or "extension" in msg_lower
-    is_outstanding_question = any(kw in msg_lower for kw in ["outstanding", "balance", "total due", "amount due"])
-    is_payment_question = any(kw in msg_lower for kw in [
-        "last payment",
-        "previous payment",
-        "payment history",
-        "payment done",
-        "payments done",
-        "payment made",
-        "payments made",
-        "payment record",
-        "payment details",
-        "paid so far",
-        "paid till",
-        "how much paid",
-    ])
-    is_restructure_question = any(
-        kw in msg_lower
-        for kw in [
-            "restructur",
-            "reduce emi",
-            "extend tenure",
-            "reschedule",
-            "modify loan",
-            "extend the tenure",
-            "lower my emi",
-            "decrease my emi",
-        ]
-    )
-
-    ai_response = ""
-
-    def _format_loans(loans):
-        lines = []
-        for l in loans:
-            lines.append(
-                f"- {l.loan_id}: {l.loan_type} | EMI ₹{l.emi_amount:,.0f} due {l.emi_due_date} | Outstanding ₹{l.outstanding_balance:,.0f}"
-            )
-        return "\n".join(lines)
-
-    def _extract_loan_ids(text: str):
-        import re
-        ids = []
-        for match in re.findall(r"loan\s*([a-zA-Z0-9]+)", text, flags=re.IGNORECASE):
-            candidate = match.strip().upper()
-            if candidate.startswith("LOAN"):
-                ids.append(candidate)
-            else:
-                ids.append(f"LOAN{candidate}")
-        return ids
-
-    loans_list_phrases = [
-        "what are my loans",
-        "list my loans",
-        "show my loans",
-        "how many loans",
-        "loan list",
-        "my loans",
-    ]
-
-    is_loans_list_question = any(p in msg_lower for p in loans_list_phrases)
-
-    if is_history_question:
-        # Pull all user messages in this session (including current), ordered ASC, then drop the latest to avoid echoing current question
-        user_questions = (
-            db.query(ChatMessage)
-            .filter(ChatMessage.session_id == session_id, ChatMessage.role == "user")
-            .order_by(ChatMessage.timestamp.asc())
-            .all()
+    # ── Run LangGraph chat workflow ───────────────────────────────
+    try:
+        result = run_chat_response(
+            db          = db,
+            customer_id = customer_id,
+            session_id  = session_id,
+            user_query  = body.message.strip(),
+            loan_id     = body.loan_id,
         )
-        earlier_questions = [m.message_text for m in user_questions[:-1]] if len(user_questions) > 1 else []
+        ai_response = result.get("llm_response", "")
+    except Exception as e:
+        print(f"[ChatRouter] Workflow error: {e}")
+        ai_response = ""
 
-        # Filter out meta/history questions and keep only banking-relevant queries
-        meta_phrases = [
-            "what did i ask earlier",
-            "have i asked",
-            "list the questions",
-            "summarize our conversation",
-            "what question did i ask",
-            "what did we discuss",
-            "conversation summary",
-            # new recall variants — must not appear as "banking questions"
-            "previous question",
-            "previous questions",
-            "what have i asked",
-            "questions i asked",
-            "questions that i have asked",
-            "asked to you",
-            "i asked to you",
-            "what i asked",
-            "what i have asked",
-            "history of questions",
-            "what questions have i",
-        ]
-        banking_keywords = [
-            "loan",
-            "emi",
-            "grace",
-            "restructure",
-            "restructuring",
-            "payment",
-            "balance",
-            "due",
-            "interest",
-            "amount",
-            "outstanding",
-            "installment",
-        ]
-
-        def is_meta(text: str) -> bool:
-            return any(p in text.lower() for p in meta_phrases)
-
-        def is_banking(text: str) -> bool:
-            lower_q = text.lower()
-            return any(k in lower_q for k in banking_keywords)
-
-        filtered = [q for q in earlier_questions if not is_meta(q) and is_banking(q)]
-
-        def normalize(q: str) -> str:
-            cleaned = q.strip().lower()
-            # remove leading/trailing quotes and punctuation variants
-            cleaned = cleaned.strip('"“”‘’\' )')
-            cleaned = cleaned.rstrip(".?!")
-            return cleaned
-
-        # De-duplicate while preserving order with normalization
-        seen = set()
-        deduped = []
-        for q in filtered:
-            key = normalize(q)
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(q)
-
-        if deduped:
-            formatted = "\n\n".join([f"{i+1}. {q}" for i, q in enumerate(deduped)])
-            ai_response = f"You asked the following questions earlier in this conversation:\n\n{formatted}"
-        else:
-            ai_response = "You have not asked any banking-related questions yet in this conversation."
-
-    elif is_loans_list_question:
-        loans_q = db.query(Loan).filter(Loan.customer_id == customer_id)
-        if scoped_loan_id:
-            loans_q = loans_q.filter(Loan.loan_id == scoped_loan_id)
-        loans = loans_q.order_by(Loan.emi_due_date.desc()).all()
-        if loans:
-            summary = _format_loans(loans)
-            ai_response = (
-                f"You have {len(loans)} loan(s). Here are the details:\n{summary}\n"
-                "Tell me a loan ID if you want details for a specific one."
-            )
-        else:
-            ai_response = "I could not find any loan details for your account."
-
-    elif is_emi_question:
-        try:
-            loans_q = db.query(Loan).filter(Loan.customer_id == customer_id)
-            if scoped_loan_id:
-                loans_q = loans_q.filter(Loan.loan_id == scoped_loan_id)
-            loans = loans_q.order_by(Loan.emi_due_date.desc()).all()
-            if loans:
-                if len(loans) == 1:
-                    loan = loans[0]
-                    prefix = f"Your loan number is {loan.loan_id}. " if needs_loan_number else ""
-                    ai_response = f"{prefix}Your EMI amount is ₹{loan.emi_amount:,.0f} due on {loan.emi_due_date}."
-                else:
-                    summary = _format_loans(loans)
-                    ai_response = (
-                        "You have multiple loans. Here are your EMIs and details:\n"
-                        f"{summary}\n"
-                        "Please tell me a loan ID if you want details for a specific loan."
-                    )
-            else:
-                ai_response = "I could not find any loan details for your account."
-        except Exception as e:
-            print(f"[ChatRouter] EMI lookup failed: {e}")
-            ai_response = "I'm having trouble processing your request right now."
-
-    elif is_outstanding_question:
-        try:
-            loans_q = db.query(Loan).filter(Loan.customer_id == customer_id)
-            if scoped_loan_id:
-                loans_q = loans_q.filter(Loan.loan_id == scoped_loan_id)
-            loans = loans_q.order_by(Loan.emi_due_date.desc()).all()
-            if loans:
-                total_outstanding = sum(l.outstanding_balance for l in loans)
-                if len(loans) == 1:
-                    l = loans[0]
-                    ai_response = (
-                        f"Your outstanding balance for loan {l.loan_id} is ₹{l.outstanding_balance:,.0f}. "
-                        f"Your next EMI of ₹{l.emi_amount:,.0f} is due on {l.emi_due_date}."
-                    )
-                else:
-                    summary = _format_loans(loans)
-                    ai_response = (
-                        f"Across all loans, your total outstanding is ₹{total_outstanding:,.0f}.\n"
-                        f"Here are the details:\n{summary}\n"
-                        "Tell me a loan ID if you want a specific breakdown."
-                    )
-            else:
-                ai_response = "I could not find any loan details for your account."
-        except Exception as e:
-            print(f"[ChatRouter] Outstanding lookup failed: {e}")
-            ai_response = "I'm having trouble retrieving your outstanding balance right now."
-
-    elif is_payment_question:
-        try:
-            from backend.db.models import PaymentHistory
-            # Determine which loan(s) to query
-            loans_q = db.query(Loan).filter(Loan.customer_id == customer_id)
-            if scoped_loan_id:
-                loans_q = loans_q.filter(Loan.loan_id == scoped_loan_id)
-            loans = loans_q.all()
-
-            if not loans:
-                ai_response = "I could not find any loan details for your account."
-            else:
-                all_parts = []
-                for loan in loans:
-                    payments = (
-                        db.query(PaymentHistory)
-                        .filter(PaymentHistory.loan_id == loan.loan_id)
-                        .order_by(PaymentHistory.payment_date.desc())
-                        .all()
-                    )
-                    if not payments:
-                        all_parts.append(f"No payment records found for loan {loan.loan_id}.")
-                    else:
-                        header = f"Payment history for {loan.loan_id} ({loan.loan_type}):"
-                        rows = []
-                        for p in payments:
-                            rows.append(
-                                f"  • {p.payment_date} — ₹{p.payment_amount:,.0f} via {p.payment_method}"
-                            )
-                        all_parts.append(header + "\n" + "\n".join(rows))
-
-                ai_response = "\n\n".join(all_parts)
-        except Exception as e:
-            print(f"[ChatRouter] Payment history lookup failed: {e}")
-            ai_response = "I'm having trouble retrieving your payment history right now."
-
-    elif is_grace_question or is_restructure_question:
-        try:
-            loans_q = db.query(Loan).filter(Loan.customer_id == customer_id)
-            if scoped_loan_id:
-                loans_q = loans_q.filter(Loan.loan_id == scoped_loan_id)
-            loans = loans_q.order_by(Loan.emi_due_date.desc()).all()
-            if not loans:
-                ai_response = "I could not find any loan details for your account."
-            else:
-                requested_ids = _extract_loan_ids(msg_lower)
-                if requested_ids:
-                    loans = [l for l in loans if l.loan_id.upper() in requested_ids]
-                if not loans:
-                    ai_response = "I couldn't match the loan ID you mentioned. Please provide a valid loan ID."
-                else:
-                    parts = []
-                    if is_grace_question:
-                        for l in loans:
-                            if l.days_past_due < 30:
-                                parts.append(
-                                    f"Grace – {l.loan_id}: Eligible for up to 7 days. Submit a grace request from 'Your Loans'."
-                                )
-                            else:
-                                parts.append(
-                                    f"Grace – {l.loan_id}: Grace may not be available automatically given the current status. Please contact the bank or submit a grace request from your loan details page."
-                                )
-                    if is_restructure_question:
-                        for l in loans:
-                            parts.append(
-                                f"Restructure – {l.loan_id}: EMI ₹{l.emi_amount:,.0f}, outstanding ₹{l.outstanding_balance:,.0f}. You can submit a restructure request from 'Your Loans'; a bank officer will review it within 2 business days."
-                            )
-                    ai_response = "\n".join(parts)
-        except Exception as e:
-            print(f"[ChatRouter] Grace/Restructure lookup failed: {e}")
-            ai_response = "I'm having trouble checking grace/restructure options right now."
-
-    else:
-        # ── Build context and call LLM ─────────────────────────────
-        context_prompt = ContextBuilder.build_context(
-            db=db,
-            session_id=session_id,
-            user_message=body.message.strip(),
-            top_k_memories=3,
-            loan_id=scoped_loan_id,       # ← scope the LLM to this loan
-        )
-
-        try:
-            if is_ollama_available():
-                system_prompt = (
-                    "You are a helpful banking virtual assistant. "
-                    "Answer ONLY about the loan marked as ACTIVE LOAN in the System Context. "
-                    "Never mention or answer about any other loan. "
-                    "Use only the provided context. If information is missing, say so briefly. "
-                    "Be concise and factual."
-                )
-                ai_response = call_ollama(prompt=context_prompt, system_prompt=system_prompt)
-        except Exception as e:
-            print(f"[ChatRouter] LLM call error: {e}")
-
-        # ── Fallback response if workflow fails ───────────────────
-        if not ai_response:
-            ai_response = _fallback_response(body.message, db, customer_id)
-
-    # If first assistant reply, prepend a one-time intro
-    if is_first_assistant_reply and ai_response:
-        intro = (
-            "Hello! I'm your AI assistant. I can help with EMIs, outstanding balances, "
-            "grace/restructure options, and loan questions.\n\n"
-        )
-        ai_response = intro + ai_response
+    # ── Fallback response if workflow fails ───────────────────────
+    if not ai_response:
+        ai_response = _fallback_response(body.message, db, customer_id)
 
     # ── Save assistant response ───────────────────────────────────
     assistant_msg = ChatMessage(
@@ -652,30 +305,13 @@ def send_message(
     except Exception as e:
         print(f"[ChatRouter] Vector store failed (non-critical): {e}")
 
-    # ── Persist sentiment to InteractionHistory (feeds officer dashboard) ─
-    try:
-        from backend.agents.sentiment_agent import analyze_and_store_interaction
-        customer = db.query(Customer).filter(Customer.customer_id == customer_id).first()
-        customer_name = customer.customer_name if customer else "Unknown"
-        analyze_and_store_interaction(
-            db               = db,
-            customer_id      = customer_id,
-            interaction_type = "Chat",
-            conversation_text= body.message.strip(),
-            customer_name    = customer_name,
-        )
-    except Exception as e:
-        print(f"[ChatRouter] InteractionHistory store failed (non-critical): {e}")
-
     return {
         "success":       True,
         "session_id":    session_id,
         "user_message": {
-            "role":            "user",
-            "message_text":    body.message.strip(),
-            "timestamp":       now,
-            "sentiment_score": user_sentiment_score,
-            "sentiment_label": user_sentiment_label,
+            "role":         "user",
+            "message_text": body.message.strip(),
+            "timestamp":    now,
         },
         "ai_response": {
             "message_id":   assistant_msg.message_id,
