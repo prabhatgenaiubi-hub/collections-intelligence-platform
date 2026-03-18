@@ -32,19 +32,121 @@ function scoreBar(score) {
   );
 }
 
+// ── Inline Negative Detail Panel ──────────────────────────────────────────
+// Shown inline inside the card row — only the negative messages / transcript
+
+function InlineNegativeDetail({ customerId, interaction }) {
+  const [detail,   setDetail]   = useState(null);
+  const [loading,  setLoading]  = useState(true);
+
+  useEffect(() => {
+    api.get(`/officer/customer/${customerId}/interactions`)
+      .then(r => setDetail(r.data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [customerId]);
+
+  if (loading) {
+    return (
+      <div className="flex justify-center py-3">
+        <div className="animate-spin rounded-full h-5 w-5 border-2 border-red-400 border-t-transparent" />
+      </div>
+    );
+  }
+
+  if (!detail) return null;
+
+  const isoTime = interaction.interaction_time;
+
+  // ── Chat interaction: show only the negative messages from the matching session ──
+  if (interaction.interaction_type === 'Chat') {
+    // Find the session that contains a message whose timestamp matches the interaction_time
+    let targetSession = null;
+    for (const session of detail.chat_sessions) {
+      const hasMatch = session.messages.some(
+        m => m.timestamp?.slice(0, 16) === isoTime?.slice(0, 16)
+      );
+      if (hasMatch) { targetSession = session; break; }
+    }
+    // Fallback: most recent session
+    if (!targetSession && detail.chat_sessions.length > 0) targetSession = detail.chat_sessions[0];
+    if (!targetSession) return <p className="text-xs text-gray-400 px-2 py-2">No chat session found.</p>;
+
+    const negMsgs = targetSession.messages.filter(
+      m => m.role === 'user' && m.sentiment_label === 'Negative'
+    );
+
+    return (
+      <div className="mt-2 border-t border-red-100 pt-2 space-y-1.5">
+        <p className="text-[10px] font-semibold text-red-500 uppercase tracking-wide mb-1">
+          🚨 Flagged Messages in "{targetSession.session_title}"
+        </p>
+        {negMsgs.length === 0 ? (
+          <p className="text-xs text-gray-400">No individually negative messages found.</p>
+        ) : (
+          negMsgs.map((msg, idx) => (
+            <div
+              key={idx}
+              className="flex justify-end"
+            >
+              <div className="max-w-[90%] bg-red-600 text-white rounded-2xl rounded-br-none px-3 py-2 text-xs leading-relaxed ring-2 ring-red-200">
+                {msg.message_text}
+                <div className="text-[9px] text-red-200 mt-0.5">{msg.timestamp?.slice(11, 16)}</div>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    );
+  }
+
+  // ── Call interaction: show summary + transcript for the matching call ──
+  if (interaction.interaction_type === 'Call') {
+    const matchCall = detail.calls.find(
+      c => c.interaction_time?.slice(0, 16) === isoTime?.slice(0, 16)
+    );
+    if (!matchCall) return <p className="text-xs text-gray-400 px-2 py-2">No call record found.</p>;
+
+    return (
+      <div className="mt-2 border-t border-red-100 pt-2 space-y-2">
+        {matchCall.interaction_summary && (
+          <div>
+            <p className="text-[10px] font-semibold text-red-500 uppercase tracking-wide mb-0.5">
+              🚨 AI Summary
+            </p>
+            <p className="text-xs text-gray-700 leading-relaxed">{matchCall.interaction_summary}</p>
+          </div>
+        )}
+        {matchCall.conversation_text && (
+          <div>
+            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-0.5">
+              📝 Transcript
+            </p>
+            <p className="text-xs text-gray-600 leading-relaxed whitespace-pre-wrap max-h-36 overflow-y-auto">
+              {matchCall.conversation_text}
+            </p>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return null;
+}
+
 // ── Interaction Detail Modal ───────────────────────────────────────────────
 
 function InteractionDetailModal({ customerId, customerName, onClose }) {
-  const [data,    setData]    = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [tab,     setTab]     = useState('chat'); // 'chat' | 'calls'
-  const [openSession, setOpenSession] = useState(null); // expanded chat session id
+  const [data,        setData]        = useState(null);
+  const [loading,     setLoading]     = useState(true);
+  const [tab,         setTab]         = useState('chat'); // 'chat' | 'calls'
+  const [openSession, setOpenSession] = useState(null);  // expanded chat session id
 
   useEffect(() => {
     api.get(`/officer/customer/${customerId}/interactions`)
       .then(r => {
         setData(r.data);
-        // Default to 'calls' tab if customer has no chat but has calls
+        // Default to 'calls' tab if no chat exists
         if (r.data.chat_sessions.length === 0 && r.data.calls.length > 0) setTab('calls');
       })
       .catch(() => {})
@@ -124,6 +226,9 @@ function InteractionDetailModal({ customerId, customerName, onClose }) {
                         <p className="text-sm font-semibold text-gray-700">📋 {session.session_title}</p>
                         <p className="text-xs text-gray-400">
                           Started {session.created_at?.slice(0, 16)} · {session.messages.filter(m => m.role === 'user').length} user message(s)
+                          {session.messages.some(m => m.sentiment_label === 'Negative') && (
+                            <span className="text-red-500 ml-2">· has negative messages</span>
+                          )}
                         </p>
                       </div>
                       <span className="text-gray-400 text-sm">{openSession === session.session_id ? '▲' : '▼'}</span>
@@ -132,28 +237,34 @@ function InteractionDetailModal({ customerId, customerName, onClose }) {
                     {/* Chat bubble thread */}
                     {openSession === session.session_id && (
                       <div className="px-4 py-3 space-y-2 bg-white max-h-72 overflow-y-auto">
-                        {session.messages.map((msg, idx) => (
-                          <div
-                            key={idx}
-                            className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                          >
+                        {session.messages.map((msg, idx) => {
+                          const isNeg = msg.sentiment_label === 'Negative';
+                          return (
                             <div
-                              className={`max-w-[80%] rounded-2xl px-4 py-2 text-sm leading-relaxed ${
-                                msg.role === 'user'
-                                  ? 'bg-blue-600 text-white rounded-br-none'
-                                  : msg.role === 'assistant'
-                                  ? 'bg-gray-100 text-gray-800 rounded-bl-none'
-                                  : 'bg-yellow-50 text-gray-500 text-xs italic w-full text-center rounded-xl'
-                              }`}
+                              key={idx}
+                              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
                             >
-                              {msg.role === 'system' && <span className="font-medium">System: </span>}
-                              {msg.message_text}
-                              <p className={`text-[10px] mt-1 ${msg.role === 'user' ? 'text-blue-200' : 'text-gray-400'}`}>
-                                {msg.timestamp?.slice(11, 16)}
-                              </p>
+                              <div
+                                className={`max-w-[80%] rounded-2xl px-4 py-2 text-sm leading-relaxed ${
+                                  msg.role === 'user'
+                                    ? isNeg
+                                      ? 'bg-red-600 text-white rounded-br-none ring-2 ring-red-300'
+                                      : 'bg-blue-600 text-white rounded-br-none'
+                                    : msg.role === 'assistant'
+                                    ? 'bg-gray-100 text-gray-800 rounded-bl-none'
+                                    : 'bg-yellow-50 text-gray-500 text-xs italic w-full text-center rounded-xl'
+                                }`}
+                              >
+                                {msg.role === 'system' && <span className="font-medium">System: </span>}
+                                {msg.message_text}
+                                <div className={`text-[10px] mt-1 flex items-center gap-1 ${msg.role === 'user' ? (isNeg ? 'text-red-200' : 'text-blue-200') : 'text-gray-400'}`}>
+                                  <span>{msg.timestamp?.slice(11, 16)}</span>
+                                  {isNeg && <span>· 🚨 Negative</span>}
+                                </div>
+                              </div>
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -209,8 +320,9 @@ function InteractionDetailModal({ customerId, customerName, onClose }) {
 // ── Customer Sentiment Card ────────────────────────────────────────────────
 
 function CustomerSentimentCard({ data }) {
-  const [expanded,    setExpanded]    = useState(false);
-  const [showModal,   setShowModal]   = useState(false);
+  const [expanded,   setExpanded]   = useState(false);
+  const [showModal,  setShowModal]  = useState(false);
+  const [inlineOpen, setInlineOpen] = useState(null); // interaction_time of the inline-expanded Negative row
 
   // Use last-3 sentiment for the card header — reflects current risk
   const headerTonality = data.last3_tonality || data.dominant_tonality;
@@ -264,6 +376,7 @@ function CustomerSentimentCard({ data }) {
             <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
               Last 3 Interactions
             </p>
+            {/* Always visible — full history */}
             <button
               onClick={() => setShowModal(true)}
               className="text-xs text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-blue-50 transition-colors"
@@ -274,24 +387,54 @@ function CustomerSentimentCard({ data }) {
           {data.recent_interactions.length === 0 && (
             <p className="text-xs text-gray-400">No interaction history (Chat or Call).</p>
           )}
-          {data.recent_interactions.map((i, idx) => (
-            <div key={idx} className="bg-white rounded-lg px-4 py-2.5 border border-gray-100 text-xs">
-              <div className="flex items-center justify-between mb-1">
-                <span className="font-medium text-gray-700">
-                  {typeIcon(i.interaction_type)} {i.interaction_type} · {i.interaction_time?.slice(0, 16)}
-                </span>
-                <span className={`px-2 py-0.5 rounded-full font-medium ${tonalityBg(i.tonality_score)}`}>
-                  {tonalityEmoji(i.tonality_score)} {i.tonality_score}
-                </span>
+          {data.recent_interactions.map((i, idx) => {
+            const isNeg = i.tonality_score === 'Negative';
+            const isInlineOpen = inlineOpen === i.interaction_time;
+            return (
+              <div
+                key={idx}
+                className={`bg-white rounded-lg px-4 py-2.5 border text-xs ${
+                  isNeg ? 'border-red-200' : 'border-gray-100'
+                }`}
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-medium text-gray-700">
+                    {typeIcon(i.interaction_type)} {i.interaction_type} · {i.interaction_time?.slice(0, 16)}
+                  </span>
+                  {/* Only Negative badge is clickable — toggles inline detail panel */}
+                  {isNeg ? (
+                    <button
+                      onClick={() => setInlineOpen(isInlineOpen ? null : i.interaction_time)}
+                      className={`flex items-center gap-1 px-2 py-0.5 rounded-full font-medium transition-colors ${tonalityBg(i.tonality_score)} hover:opacity-80 cursor-pointer`}
+                      title="Click to see flagged messages"
+                    >
+                      {tonalityEmoji(i.tonality_score)} {i.tonality_score}
+                      <span className="ml-0.5 text-[9px]">{isInlineOpen ? '▲' : '▼'}</span>
+                    </button>
+                  ) : (
+                    <span
+                      className={`flex items-center gap-1 px-2 py-0.5 rounded-full font-medium select-none ${tonalityBg(i.tonality_score)}`}
+                    >
+                      {tonalityEmoji(i.tonality_score)} {i.tonality_score}
+                    </span>
+                  )}
+                </div>
+                <p className="text-gray-500 leading-relaxed">{i.interaction_summary}</p>
+                {scoreBar(i.sentiment_score)}
+                {/* Inline negative detail — only for Negative rows when toggled open */}
+                {isNeg && isInlineOpen && (
+                  <InlineNegativeDetail
+                    customerId={data.customer_id}
+                    interaction={i}
+                  />
+                )}
               </div>
-              <p className="text-gray-500 leading-relaxed">{i.interaction_summary}</p>
-              {scoreBar(i.sentiment_score)}
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
-      {/* Interaction detail modal */}
+      {/* Interaction detail modal — full history, opened via "View Full History" button */}
       {showModal && (
         <InteractionDetailModal
           customerId={data.customer_id}
@@ -597,23 +740,39 @@ export default function SentimentAnalysis() {
   const [error,      setError]      = useState('');
   const [search,     setSearch]     = useState('');
   const [filter,     setFilter]     = useState('Negative'); // Default: show at-risk customers first
+  const [lastUpdated, setLastUpdated] = useState(null);  // timestamp of last successful refresh
+  const [secAgo,      setSecAgo]      = useState(0);     // seconds since last update
+
+  // Background refresh — NO full-page spinner
+  const fetchSentiment = useCallback(() => {
+    setRefreshing(true);
+    api.get('/officer/sentiment')
+      .then(r => { setData(r.data); setLastUpdated(Date.now()); setSecAgo(0); })
+      .catch(() => {}) // silent — don't wipe the screen
+      .finally(() => setRefreshing(false));
+  }, []);
 
   // Initial load — shows full-page spinner
   useEffect(() => {
     api.get('/officer/sentiment')
-      .then(r => setData(r.data))
+      .then(r => { setData(r.data); setLastUpdated(Date.now()); })
       .catch(() => setError('Failed to load sentiment data.'))
       .finally(() => setLoading(false));
   }, []);
 
-  // Background refresh after call analysis — NO full-page spinner
-  const fetchSentiment = () => {
-    setRefreshing(true);
-    api.get('/officer/sentiment')
-      .then(r => setData(r.data))
-      .catch(() => {}) // silent — don't wipe the screen
-      .finally(() => setRefreshing(false));
-  };
+  // 30-second auto-refresh polling
+  useEffect(() => {
+    const poll = setInterval(fetchSentiment, 30_000);
+    return () => clearInterval(poll); // cleanup on unmount
+  }, [fetchSentiment]);
+
+  // "X seconds ago" counter — ticks every second
+  useEffect(() => {
+    const tick = setInterval(() => {
+      if (lastUpdated) setSecAgo(Math.floor((Date.now() - lastUpdated) / 1000));
+    }, 1000);
+    return () => clearInterval(tick);
+  }, [lastUpdated]);
 
   if (loading) {
     return (
@@ -638,11 +797,31 @@ export default function SentimentAnalysis() {
     <div className="space-y-6">
 
       {/* Page header */}
-      <div>
-        <h1 className="text-2xl font-bold text-gray-800">🧠 Sentiment Analysis</h1>
-        <p className="text-sm text-gray-500 mt-1">
-          Based on <span className="font-medium text-blue-600">💬 Live Chat</span> and <span className="font-medium text-blue-600">📞 Uploaded Calls</span> only · Real data, no Email/SMS/WhatsApp
-        </p>
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-800">🧠 Sentiment Analysis</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            Based on <span className="font-medium text-blue-600">💬 Live Chat</span> and <span className="font-medium text-blue-600">📞 Uploaded Calls</span> only · Real data, no Email/SMS/WhatsApp
+          </p>
+        </div>
+        {/* Auto-refresh status */}
+        <div className="text-right flex-shrink-0 ml-4">
+          <button
+            onClick={fetchSentiment}
+            disabled={refreshing}
+            className="text-xs text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1 px-3 py-1.5 rounded-lg border border-blue-200 hover:bg-blue-50 transition-colors disabled:opacity-50"
+          >
+            {refreshing
+              ? <><span className="inline-block w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" /> Refreshing…</>
+              : <>🔄 Refresh</>
+            }
+          </button>
+          {lastUpdated && (
+            <p className="text-[10px] text-gray-400 mt-1">
+              Updated {secAgo < 5 ? 'just now' : `${secAgo}s ago`} · auto-refreshes every 30s
+            </p>
+          )}
+        </div>
       </div>
 
       {/* ── Portfolio Summary Bar ── */}

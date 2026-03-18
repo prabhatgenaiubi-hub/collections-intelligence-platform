@@ -902,19 +902,31 @@ def get_customer_interactions(
         user_msgs = [m for m in messages if m.role == "user"]
         if not user_msgs:
             continue
+        from backend.agents.sentiment_agent import calculate_sentiment_score, classify_tonality
+        message_list = []
+        for m in messages:
+            entry = {
+                "role":            m.role,
+                "message_text":    m.message_text,
+                "timestamp":       m.timestamp,
+                "sentiment_score": None,
+                "sentiment_label": None,
+            }
+            if m.role == "user":
+                try:
+                    score = calculate_sentiment_score(m.message_text, "Chat")
+                    entry["sentiment_score"] = round(score, 3)
+                    entry["sentiment_label"] = classify_tonality(score)
+                except Exception:
+                    pass
+            message_list.append(entry)
+
         chat_sessions.append({
             "session_id":    session.session_id,
             "session_title": session.session_title,
             "created_at":    session.created_at,
             "last_updated":  session.last_updated,
-            "messages": [
-                {
-                    "role":         m.role,
-                    "message_text": m.message_text,
-                    "timestamp":    m.timestamp,
-                }
-                for m in messages
-            ],
+            "messages":      message_list,
         })
 
     # ── Call interactions: full transcript per call ─────────────
